@@ -1,9 +1,8 @@
-// Estilos compartidos de Ajustes y Tienda: ambas pantallas derivan su
 // apariencia del mismo objeto para mantener coherencia visual.
 import { StyleSheet } from "react-native";
 import type { ThemeColors } from "./theme";
 
-export function getStyles(colors: ThemeColors, colorCardSize: number, chartCardSize: number, glowCardSize: number) {
+export function getStyles(colors: ThemeColors, colorCardSize: number, chartCardSize: number, glowCardSize: number, bottomPad = 0) {
   const cardBg = colors.primary + "12";
 
   return StyleSheet.create({
@@ -14,7 +13,7 @@ export function getStyles(colors: ThemeColors, colorCardSize: number, chartCardS
     scroll: { flex: 1 },
     content: {
       padding: 16,
-      paddingBottom: 16,
+      paddingBottom: 16 + bottomPad,
     },
     profileSection: {
       flexDirection: "row",
@@ -98,7 +97,6 @@ export function getStyles(colors: ThemeColors, colorCardSize: number, chartCardS
       textTransform: "uppercase",
       letterSpacing: 1,
     },
-    // Fila genérica de ajustes dentro de un grupo
     rowIcon: {
       width: 34,
       height: 34,
@@ -128,7 +126,6 @@ export function getStyles(colors: ThemeColors, colorCardSize: number, chartCardS
       backgroundColor: colors.border,
       marginLeft: 58,
     },
-    // Acordeón de sincronización n8n
     syncCard: {
       backgroundColor: colors.surface,
       borderRadius: 12,
@@ -155,7 +152,6 @@ export function getStyles(colors: ThemeColors, colorCardSize: number, chartCardS
     },
     syncStatusDot: { width: 6, height: 6, borderRadius: 3 },
     syncStatusText: { fontSize: 9.5, fontWeight: "600" },
-    // Botón destructivo de borrado de datos
     dangerCard: {
       flexDirection: "row",
       alignItems: "center",
@@ -194,7 +190,6 @@ export function getStyles(colors: ThemeColors, colorCardSize: number, chartCardS
     },
     themeOptionTextActive: { color: colors.surface },
 
-    // Card de personalización
     newCard: {
       backgroundColor: colors.surface,
       borderRadius: 14,
@@ -227,11 +222,24 @@ export function getStyles(colors: ThemeColors, colorCardSize: number, chartCardS
       backgroundColor: colors.border,
       marginHorizontal: 14,
     },
-    newCardGrid: {
+    newCardList: {
+      paddingHorizontal: 14,
+      paddingBottom: 6,
+    },
+    newCardRow: {
       flexDirection: "row",
-      flexWrap: "wrap",
-      padding: 12,
-      gap: 8,
+      alignItems: "center",
+      gap: 10,
+      paddingVertical: 10,
+      borderBottomWidth: StyleSheet.hairlineWidth,
+      borderBottomColor: colors.border,
+    },
+    newCardRowIcon: {
+      width: 30,
+      height: 30,
+      borderRadius: 8,
+      alignItems: "center",
+      justifyContent: "center",
     },
     newCardCell: {
       flex: 1,
@@ -247,16 +255,15 @@ export function getStyles(colors: ThemeColors, colorCardSize: number, chartCardS
       gap: 4,
     },
     newCardLabel: {
-      fontSize: 10,
+      flex: 1,
+      fontSize: 13.5,
       fontWeight: "600",
       color: colors.textSecondary,
-      textAlign: "center",
     },
     newCardValue: {
-      fontSize: 13,
-      fontWeight: "600",
+      fontSize: 13.5,
+      fontWeight: "700",
       color: colors.textPrimary,
-      textAlign: "center",
     },
     colorDot: {
       width: 10,
@@ -325,6 +332,33 @@ export function getStyles(colors: ThemeColors, colorCardSize: number, chartCardS
       color: colors.textSecondary,
       opacity: 0.7,
       marginTop: 1,
+    },
+    freeKoinsCard: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 10,
+      paddingHorizontal: 14,
+      paddingVertical: 12,
+      marginHorizontal: 12,
+      marginTop: 12,
+      backgroundColor: colors.surface + "CC",
+      borderWidth: 1,
+      borderColor: colors.primary + "55",
+      borderRadius: 12,
+    },
+    freeKoinsInfo: {
+      flex: 1,
+      gap: 2,
+    },
+    freeKoinsTitle: {
+      fontSize: 14,
+      fontWeight: "800",
+      color: colors.primary,
+    },
+    freeKoinsDesc: {
+      fontSize: 11,
+      fontWeight: "500",
+      color: colors.textSecondary,
     },
     accordionDecor: {
       position: "absolute",
@@ -511,6 +545,39 @@ export function getStyles(colors: ThemeColors, colorCardSize: number, chartCardS
       backgroundColor: "rgba(0,0,0,0.5)",
       padding: 24,
     },
+    // Sheet inferior del modal de koins (estilo HintSheet)
+    koinsOverlay: {
+      flex: 1,
+      justifyContent: "flex-end",
+      backgroundColor: "rgba(0,0,0,0.45)",
+    },
+    koinsSheet: {
+      borderTopLeftRadius: 16,
+      borderTopRightRadius: 16,
+      borderWidth: 1,
+      borderBottomWidth: 0,
+      padding: 20,
+      paddingTop: 10,
+      gap: 16,
+    },
+    koinsGrabber: {
+      width: 36,
+      height: 4,
+      borderRadius: 2,
+      alignSelf: "center",
+      marginBottom: 10,
+    },
+    koinsScroll: {
+      maxHeight: 380,
+    },
+    koinsIntro: {
+      gap: 10,
+    },
+    koinsHero: {
+      alignItems: "center",
+      paddingTop: 4,
+      paddingBottom: 2,
+    },
     ptsCard: {
       width: "100%",
       maxWidth: 380,
@@ -553,7 +620,6 @@ export function getStyles(colors: ThemeColors, colorCardSize: number, chartCardS
       fontSize: 13,
       fontWeight: "700",
     },
-    // Guía de la tienda: párrafos y scroll interno del modal de ayuda.
     ptsHelpText: {
       fontSize: 12.5,
       lineHeight: 18,
@@ -686,7 +752,6 @@ export function getStyles(colors: ThemeColors, colorCardSize: number, chartCardS
       paddingTop: 8,
       paddingBottom: 40,
       gap: 8,
-      // Cada fila se centra y se expande hasta llenar el ancho disponible.
       justifyContent: "space-between",
     },
     shopCard: {
@@ -765,8 +830,6 @@ export function getStyles(colors: ThemeColors, colorCardSize: number, chartCardS
       justifyContent: "center",
       borderRadius: 5,
       backgroundColor: "transparent",
-      transform: [{ translateY: -5 }],
-      gap: 1,
     },
     bgPreview: {
       width: 54,
@@ -782,7 +845,6 @@ export function getStyles(colors: ThemeColors, colorCardSize: number, chartCardS
       paddingTop: 8,
       gap: 6,
       paddingBottom: 40,
-      // Cada fila se centra y se expande hasta llenar el ancho disponible.
       justifyContent: "space-between",
     },
     colorCard: {
@@ -821,6 +883,48 @@ export function getStyles(colors: ThemeColors, colorCardSize: number, chartCardS
       borderRadius: 5,
       overflow: "hidden",
       alignSelf: "center",
+      alignItems: "center",
+      justifyContent: "center",
+      padding: 2,
+    },
+    chartPreviewCard: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 12,
+      marginHorizontal: 12,
+      marginTop: 8,
+      marginBottom: 4,
+      padding: 12,
+    },
+    chartPreviewArt: {
+      borderRadius: 8,
+      paddingHorizontal: 12,
+      paddingVertical: 10,
+    },
+    chartPreviewInfo: {
+      gap: 2,
+    },
+    chartPreviewName: {
+      fontSize: 16,
+      fontWeight: "700",
+      color: colors.textPrimary,
+    },
+    chartPreviewRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 5,
+      marginTop: 4,
+    },
+    chartPreviewDot: {
+      width: 8,
+      height: 8,
+      borderRadius: 4,
+    },
+    chartPreviewHint: {
+      fontSize: 11,
+      color: colors.textSecondary,
+      marginRight: 4,
     },
     chartDiagonalWrap: {
       position: "absolute",
@@ -864,7 +968,6 @@ export function getStyles(colors: ThemeColors, colorCardSize: number, chartCardS
       paddingTop: 8,
       gap: 6,
       paddingBottom: 12,
-      // Cada fila se centra y se expande hasta llenar el ancho disponible.
       justifyContent: "space-between",
     },
     glowCard: {
@@ -1003,7 +1106,6 @@ export function getStyles(colors: ThemeColors, colorCardSize: number, chartCardS
       fontSize: 13,
       fontWeight: "600",
     },
-    // Bottom sheet de elección de borrado
     deleteSheetOverlay: {
       flex: 1,
       backgroundColor: "rgba(0,0,0,0.5)",
@@ -1074,11 +1176,10 @@ export function getStyles(colors: ThemeColors, colorCardSize: number, chartCardS
       fontSize: 13,
       fontWeight: "600",
     },
-    // Vista con la lista de lo que se borrará
     deleteListBody: {
       paddingHorizontal: 16,
       paddingTop: 10,
-      paddingBottom: 24,
+      paddingBottom: 24 + bottomPad,
       gap: 8,
     },
     deleteSummary: {
@@ -1146,7 +1247,6 @@ export function getStyles(colors: ThemeColors, colorCardSize: number, chartCardS
       fontSize: 14,
       fontWeight: "700",
     },
-    // Confirmación final
     deleteConfirmIcon: {
       width: 56,
       height: 56,
@@ -1182,11 +1282,47 @@ export function getStyles(colors: ThemeColors, colorCardSize: number, chartCardS
       fontSize: 14,
       fontWeight: "700",
     },
+    deleteProgressWrap: {
+      alignSelf: "stretch",
+      marginBottom: 20,
+    },
+    deleteProgressRow: {
+      flexDirection: "row",
+      justifyContent: "space-between",
+      alignItems: "center",
+      marginBottom: 6,
+    },
+    deleteProgressLabel: {
+      fontSize: 12,
+      fontWeight: "600",
+      flex: 1,
+      marginRight: 8,
+    },
+    deleteProgressPct: {
+      fontSize: 12,
+      fontWeight: "700",
+      fontVariant: ["tabular-nums"],
+    },
+    deleteProgressTrack: {
+      height: 6,
+      borderRadius: 3,
+      overflow: "hidden",
+    },
+    deleteProgressFill: {
+      height: "100%",
+      borderRadius: 3,
+    },
+    deleteProgressCount: {
+      fontSize: 11,
+      marginTop: 6,
+      textAlign: "center",
+    },
     footerWrap: {
       paddingTop: 14,
-      paddingBottom: 28,
+      paddingBottom: 28 + bottomPad,
       paddingHorizontal: 16,
       backgroundColor: colors.background,
+      position: "relative",
     },
     footerRow: {
       flexDirection: "row",
@@ -1200,12 +1336,63 @@ export function getStyles(colors: ThemeColors, colorCardSize: number, chartCardS
       opacity: 0.6,
       letterSpacing: 0.3,
     },
+    // Area invisible (derecha inferior del footer) que abre el menu de desarrollo.
+    devTrigger: {
+      position: "absolute",
+      right: 10,
+      bottom: 10,
+      width: 64,
+      height: 40,
+      backgroundColor: "transparent",
+    },
     codeCloseBtn: {
       position: "absolute",
       top: 10,
       right: 10,
       padding: 4,
       zIndex: 1,
+    },
+    rewardTopRow: {
+      flexDirection: "row",
+      justifyContent: "flex-start",
+      alignItems: "center",
+      gap: 8,
+    },
+    rewardBadge: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 5,
+      backgroundColor: colors.surface,
+      borderWidth: 1,
+      borderColor: colors.border,
+      borderRadius: 20,
+      paddingVertical: 6,
+      paddingHorizontal: 12,
+    },
+    rewardBadgeText: {
+      fontSize: 14,
+      fontWeight: "700",
+      color: colors.warning,
+    },
+    rewardText: {
+      fontSize: 16,
+      fontWeight: "600",
+      lineHeight: 24,
+      textAlign: "center",
+      paddingVertical: 8,
+    },
+    rewardClaimBtn: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 8,
+      borderRadius: 12,
+      paddingVertical: 14,
+      paddingHorizontal: 20,
+    },
+    rewardClaimText: {
+      fontSize: 16,
+      fontWeight: "700",
     },
     codeRow: {
       flexDirection: "row",

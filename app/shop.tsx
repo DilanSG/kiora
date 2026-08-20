@@ -1,16 +1,18 @@
 import {
   View,
   StyleSheet,
+  Text,
   TextInput,
   ScrollView,
   Modal,
   Dimensions,
   TouchableOpacity,
   ActivityIndicator,
+  BackHandler,
 } from "react-native";
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
-import { router } from "expo-router";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { router, useFocusEffect, useLocalSearchParams } from "expo-router";
+import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import Svg, { Polygon, Circle, Ellipse, Rect, Path, G } from "react-native-svg";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { purchaseBundle, getUserPoints, awardPoints } from "../lib/storage";
@@ -22,6 +24,7 @@ import { VISUAL_CONCEPTS, CALM_MOVEMENTS, ACTIVE_MOVEMENTS } from "../lib/recomm
 import BackgroundDecor from "../components/ui/BackgroundDecor";
 import AppText from "../components/ui/AppText";
 import GlowView from "../components/ui/GlowView";
+import { KoinIcon } from "../components/brand/KoinIcon";
 import { useAlert } from "../components/ui/AlertModal";
 
 const THEME_OPTIONS: { value: ThemeMode; label: string; icon: keyof typeof Ionicons.glyphMap }[] = [
@@ -77,7 +80,43 @@ const MOVEMENT_ICON: Record<string, { set: "ion" | "mci"; name: string }> = {
   pendulo: { set: "mci", name: "arrow-oscillating" },
 };
 
-// Vista previa de los seis elementos de un recomendado (chips de color e icono).
+type TextStyle = React.ComponentProps<typeof Text>["style"];
+
+// Mini gráfico de barras con eje: alterna los colores del par (p. ej. ingresos
+// y gastos) con alturas variadas que simulan datos reales del dashboard.
+function PairBarsChart(props: {
+  pos: string;
+  neg: string;
+  colors: ThemeColors;
+  height: number;
+  barWidth?: number;
+  barCount?: number;
+}) {
+  const { pos, neg, colors, height, barWidth = 6, barCount = 5 } = props;
+  const heights = [0.55, 0.85, 0.35, 0.9, 0.65, 0.45, 0.75];
+  return (
+    <View style={{ height, flexDirection: "row", alignItems: "flex-end", gap: 2 }}>
+      <View style={{ width: 1, height: "100%", backgroundColor: colors.border, marginRight: 4 }} />
+      {heights.slice(0, barCount).map((h, i) => (
+        <View key={i} style={{ width: barWidth, borderRadius: 2, height: h * height, backgroundColor: i % 2 === 0 ? pos : neg }} />
+      ))}
+      <View style={{ position: "absolute", left: 0, right: 0, bottom: 0, height: 1, backgroundColor: colors.border }} />
+    </View>
+  );
+}
+
+// Texto dividido en dos mitades: la primera toma un color del par y la
+// segunda el otro (p. ej. "Spiderman" → mitad azul, mitad rojo).
+function BicolorText(props: { text: string; a: string; b: string; style?: TextStyle }) {
+  const mid = Math.ceil(props.text.length / 2);
+  return (
+    <Text style={props.style} numberOfLines={1}>
+      <Text style={{ color: props.a }}>{props.text.slice(0, mid)}</Text>
+      <Text style={{ color: props.b }}>{props.text.slice(mid)}</Text>
+    </Text>
+  );
+}
+
 function RecChips({ items, colors, styles }: { items: RecItem[]; colors: ThemeColors; styles: ReturnType<typeof getStyles> }) {
   return (
     <View style={styles.recomChips}>
@@ -118,8 +157,34 @@ function RecChips({ items, colors, styles }: { items: RecItem[]; colors: ThemeCo
   );
 }
 
+function PriceOverlay({ cost, colors }: { cost: number; colors: ThemeColors }) {
+  return (
+    <View style={{ alignItems: "center", gap: 1 }}>
+      <KoinIcon size={16} color={colors.surface} />
+      <AppText style={{ fontSize: 10, fontWeight: "800", color: colors.surface }}>{cost}</AppText>
+    </View>
+  );
+}
+
 export default function ShopScreen() {
   const colors = useTheme();
+  const insets = useSafeAreaInsets();
+  // Registrar el origen de la navegación: si vino de Ajustes, el back debe
+  // devolver a Ajustes y no al inicio (la pila de tabs no la conserva).
+  const { from } = useLocalSearchParams<{ from?: string }>();
+  const goBack = useCallback(() => {
+    if (from === "settings") router.replace("/settings");
+    else router.back();
+  }, [from]);
+
+  useEffect(() => {
+    if (from !== "settings") return;
+    const sub = BackHandler.addEventListener("hardwareBackPress", () => {
+      goBack();
+      return true;
+    });
+    return () => sub.remove();
+  }, [from, goBack]);
   const { mode, setMode, isDark } = useThemeMode();
   const { activeVariantId, purchasedIds, equipTheme, purchaseTheme, refreshPurchased, allThemes } = useThemeShop();
   const {
@@ -155,7 +220,7 @@ export default function ShopScreen() {
   const GLOW_CARD_SIZE = COLOR_CARD_SIZE;
   const CHART_CARD_SIZE = (SCREEN_WIDTH - 24 - 30) / 5;
 
-  const styles = getStyles(colors, COLOR_CARD_SIZE, CHART_CARD_SIZE, GLOW_CARD_SIZE);
+  const styles = getStyles(colors, COLOR_CARD_SIZE, CHART_CARD_SIZE, GLOW_CARD_SIZE, insets.bottom);
 
   const [shopPoints, setShopPoints] = useState(0);
   const [buyingId, setBuyingId] = useState<string | null>(null);
@@ -164,9 +229,11 @@ export default function ShopScreen() {
   const [sendingFeedback, setSendingFeedback] = useState(false);
   const [ptsInfoVisible, setPtsInfoVisible] = useState(false);
   const [shopHelpVisible, setShopHelpVisible] = useState(false);
-  // Etiqueta del recomendado que se está equipando (para mostrar la carga).
   const [equipping, setEquipping] = useState<string | null>(null);
   const [trackWidth, setTrackWidth] = useState(200);
+  // Par de gráficas que se muestra en el preview grande de la sección. null
+  // significa "el activo"; al tocar una tarjeta se previsualiza ese par.
+  const [chartPreviewId, setChartPreviewId] = useState<string | null>(null);
   const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({
     themes: false,
     backgrounds: false,
@@ -179,9 +246,14 @@ export default function ShopScreen() {
   const toggleSection = useCallback((section: string) =>
     setExpandedSections((prev) => ({ ...prev, [section]: !prev[section] })), []);
 
-  useEffect(() => {
-    getUserPoints().then(setShopPoints);
-  }, []);
+  // El saldo en koins se relee en cada foco: se gana en Ajustes (código
+  // secreto), en dev y en metas; con un useEffect de mount puro la pestaña
+  // queda montada y mostraría siempre el saldo viejo.
+  useFocusEffect(
+    useCallback(() => {
+      getUserPoints().then(setShopPoints);
+    }, [])
+  );
 
   // Estilo aleatorio: elige en orden tema, fondo, color, gráficas, movimientos
   // y brillos, siempre entre los que el usuario ya tiene disponibles.
@@ -294,7 +366,7 @@ export default function ShopScreen() {
   }, [equipTheme, equipBackground, setButtonColor, chart, movement, glow]);
 
   // Compra de un recomendado: desbloquea solo los elementos que faltan, con
-  // una transaccion única, y refresca las seis tiendas + puntos. Si ya está
+  // una transaccion única, y refresca las seis tiendas + koins. Si ya está
   // completo (precio 0), la card se toca y se equipan sus estilos con carga.
   const buyRecommendation = useCallback(async (rec: Recommendation) => {
     const ownedMap: Record<string, Set<string>> = {
@@ -318,7 +390,7 @@ export default function ShopScreen() {
       return;
     }
     const missing = rec.items.filter((it) => !ownedMap[it.key]!.has(it.id));
-    showAlert(`Comprar "${rec.label}"`, `Desbloquea ${missing.length} elementos por ${rec.price} pts. ¿Los compras juntos?`, [
+    showAlert(`Comprar "${rec.label}"`, `Desbloquea ${missing.length} elementos por ${rec.price} koins. ¿Los compras juntos?`, [
       { text: "Cancelar", style: "cancel" },
       {
         text: "Comprar",
@@ -348,6 +420,15 @@ export default function ShopScreen() {
       },
     ]);
   }, [purchasedIds, purchasedBackgroundIds, purchasedButtonColorIds, chart, movement, glow, refreshPurchased, refreshPurchasedBackgrounds, refreshPurchasedButtonColors, equipRecommendation, equipping, showAlert, toggleSection]);
+
+  // Reclama los 150 koins gratis: se entregan una sola vez y alcanzan justo
+  // para comprar un conjunto completo de la tienda.
+  const handleClaimFreeKoins = async () => {
+    await claimFreePoints();
+    const pts = await getUserPoints();
+    setShopPoints(pts);
+    showAlert("150 koins gratis", "Has recibido 150 koins: alcanzan para comprar un conjunto completo de la tienda.");
+  };
 
   const handlePurchase = async (themeId: string, cost: number) => {
     setBuyingId(themeId);
@@ -444,13 +525,13 @@ export default function ShopScreen() {
         "INSERT OR REPLACE INTO settings (key, value) VALUES ('reported_configs', ?)",
         JSON.stringify(hashes)
       );
-      await awardPoints(10);
+      await awardPoints(100);
       const pts = await getUserPoints();
       setShopPoints(pts);
 
       setSendingFeedback(false);
       setFeedbackVisible(false);
-      showAlert("¡Gracias!", "Has recibido 10 puntos por tu reporte.");
+      showAlert("¡Gracias!", "Has recibido 100 koins por tu reporte.");
     } catch (e: any) {
       setSendingFeedback(false);
       showAlert("Error al enviar", e.message || "No se pudo enviar el reporte. Verifica que el bridge esté corriendo.");
@@ -464,7 +545,7 @@ export default function ShopScreen() {
         {/* Header compacto: título arriba, acciones a un toque */}
         <View style={styles.shopHeader}>
           <TouchableOpacity
-            onPress={() => router.back()}
+            onPress={goBack}
             style={styles.shopBackBtn}
             hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
           >
@@ -481,7 +562,7 @@ export default function ShopScreen() {
           </View>
           <View style={{ flex: 1 }} />
           <TouchableOpacity style={styles.shopPointsBadge} onPress={() => setPtsInfoVisible(true)} activeOpacity={0.7}>
-            <Ionicons name="star" size={14} color={colors.warning} />
+            <KoinIcon size={28} />
             <AppText style={styles.shopPointsText}>{shopPoints}</AppText>
           </TouchableOpacity>
           {/* Hint: guía completa de la lógica de la tienda y sus botones */}
@@ -516,6 +597,21 @@ export default function ShopScreen() {
               );
             })}
           </View>
+
+          {/* Koins gratis: card sobre Recomendados, se reclama una sola vez y
+              alcanzan justo para un conjunto completo de la tienda. */}
+          {!freePointsClaimed && (
+            <TouchableOpacity style={styles.freeKoinsCard} onPress={handleClaimFreeKoins} activeOpacity={0.75}>
+              <KoinIcon size={34} />
+              <View style={styles.freeKoinsInfo}>
+                <AppText style={styles.freeKoinsTitle}>150 koins gratis</AppText>
+                <AppText style={styles.freeKoinsDesc}>
+                  Una sola vez: alcanzan para comprar un conjunto completo de la tienda (tema, fondo, color, gráfica, movimiento y brillo).
+                </AppText>
+              </View>
+              <Ionicons name="chevron-forward" size={16} color={colors.primary} />
+            </TouchableOpacity>
+          )}
 
           {/* Recomendados (1º acordeón): cada uno nace de un concepto visual
               y agrupa los seis estilos que le fueron asignados. Al estar
@@ -569,37 +665,27 @@ export default function ShopScreen() {
                   );
                 }
                 return (
-                  <View
+                  <TouchableOpacity
                     key={index}
                     style={[styles.recomCard, glowStyle, { backgroundColor: colors.surface, borderColor: colors.border }]}
+                    activeOpacity={0.75}
+                    onPress={() => buyRecommendation(rec)}
                   >
                     {/* Tint encima de superficie opaca: el glow sale por el perímetro */}
                     <View pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: colors.primary + "0D", borderRadius: 12 }]} />
-                    {/* Título del concepto y precio arriba */}
+                    {/* Título del concepto y precio arriba (sin botón de compra:
+                        tocar la card pide confirmación) */}
                     <View style={styles.recomHeader}>
                       <AppText style={[styles.recomLabel, { color: colors.textPrimary }]} numberOfLines={1}>
                         #{index + 1} · {rec.label}
                       </AppText>
                       <View style={styles.recomPriceBadge}>
-                        <Ionicons name="star" size={10} color={colors.warning} />
-                        <AppText style={styles.recomPriceBadgeText}>{rec.price} pts</AppText>
+                        <KoinIcon size={20} />
+                        <AppText style={styles.recomPriceBadgeText}>{rec.price} koins</AppText>
                       </View>
                     </View>
                     <RecChips items={rec.items} colors={colors} styles={styles} />
-                    {/* Compra de lo que falta */}
-                    <View style={styles.recomActions}>
-                      <TouchableOpacity
-                        style={[styles.recomActionBtn, { backgroundColor: colors.primary }]}
-                        onPress={() => buyRecommendation(rec)}
-                        activeOpacity={0.7}
-                      >
-                        <Ionicons name="cart-outline" size={12} color={colors.surface} />
-                        <AppText style={[styles.recomActionText, { color: colors.surface }]}>
-                          Comprar · {rec.price} pts
-                        </AppText>
-                      </TouchableOpacity>
-                    </View>
-                  </View>
+                  </TouchableOpacity>
                 );
               })}
             </View>
@@ -635,7 +721,7 @@ export default function ShopScreen() {
                         await handleEquip(theme.id);
                         toggleSection("themes");
                       } else {
-                        showAlert(`Comprar ${theme.name}`, `¿Desbloquear este tema por ${theme.cost} pts?`, [
+                        showAlert(`Comprar ${theme.name}`, `¿Desbloquear este tema por ${theme.cost} koins?`, [
                           { text: "Cancelar", style: "cancel" },
                           { text: "Comprar", style: "default", onPress: async () => { await handlePurchase(theme.id, theme.cost); } },
                         ]);
@@ -652,8 +738,7 @@ export default function ShopScreen() {
                       </View>
                       {!owned && (
                         <View style={styles.lockOverlay}>
-                          <Ionicons name="lock-closed" size={11} color={colors.surface} />
-                          <AppText style={{ fontSize: 10, fontWeight: "700", color: colors.surface }}>{theme.cost}</AppText>
+                          <PriceOverlay cost={theme.cost} colors={colors} />
                         </View>
                       )}
                     </View>
@@ -693,7 +778,7 @@ export default function ShopScreen() {
                         await equipBackground(bg.id);
                         toggleSection("backgrounds");
                       } else {
-                        showAlert(`Comprar ${bg.name}`, `¿Desbloquear este fondo por ${bg.cost} pts?`, [
+                        showAlert(`Comprar ${bg.name}`, `¿Desbloquear este fondo por ${bg.cost} koins?`, [
                           { text: "Cancelar", style: "cancel" },
                           { text: "Comprar", style: "default", onPress: async () => {
                             setBuyingId(bg.id);
@@ -733,8 +818,7 @@ export default function ShopScreen() {
                       </View>
                       {!owned && (
                         <View style={styles.lockOverlay}>
-                          <Ionicons name="lock-closed" size={11} color={colors.surface} />
-                          <AppText style={{ fontSize: 10, fontWeight: "700", color: colors.surface }}>{bg.cost}</AppText>
+                          <PriceOverlay cost={bg.cost} colors={colors} />
                         </View>
                       )}
                     </View>
@@ -754,12 +838,6 @@ export default function ShopScreen() {
                 <AppText style={styles.accordionSub}>Personaliza el tono de botones y elementos interactivos</AppText>
                 <AppText style={styles.accordionDesc}>
                   {allButtonColors.length} colores · Activo: {activeButtonColorId === "default" ? "Original" : capitalize(activeButtonColorId)}
-                  {!freePointsClaimed && <> · <AppText style={{ fontSize: 10, color: colors.primary, textDecorationLine: "underline" }} onPress={async () => {
-                    await claimFreePoints();
-                    const pts = await getUserPoints();
-                    setShopPoints(pts);
-                    showAlert("+50 pts", "Has recibido 50 puntos gratis. ¡Gasta tus puntos en colores!");
-                  }}>+50 pts gratis</AppText></>}
                 </AppText>
               </View>
             </View>
@@ -781,7 +859,7 @@ export default function ShopScreen() {
                         await setButtonColor(btn.id);
                         toggleSection("colors");
                       } else {
-                        showAlert(`¿Desbloquear este color?`, `Cuesta ${btn.cost} pts`, [
+                        showAlert(`¿Desbloquear este color?`, `Cuesta ${btn.cost} koins`, [
                           { text: "Cancelar", style: "cancel" },
                           { text: "Comprar", style: "default", onPress: async () => {
                             const result = await purchaseButtonColor(btn.id, btn.cost);
@@ -796,8 +874,7 @@ export default function ShopScreen() {
                       {active && (<Ionicons name="checkmark" size={14} color={colors.surface} />)}
                       {!owned && (
                         <View style={styles.colorLockOverlay}>
-                          <Ionicons name="lock-closed" size={10} color={colors.surface} />
-                          <AppText style={styles.lockPriceText}>{btn.cost}</AppText>
+                          <PriceOverlay cost={btn.cost} colors={colors} />
                         </View>
                       )}
                     </View>
@@ -822,61 +899,85 @@ export default function ShopScreen() {
             <Ionicons name={expandedSections.chartColors ? "chevron-up" : "chevron-down"} size={16} color={colors.textSecondary} />
           </TouchableOpacity>
           {expandedSections.chartColors && (
-            <View style={styles.colorGrid}>
-              {chart.allChartColors.map((cc) => {
-                const owned = cc.cost === 0 || chart.purchasedChartColorIds.has(cc.id);
-                const active = chart.activeChartColorId === cc.id;
-                const posColor = cc.positive || colors.chartPositive || colors.success;
-                const negColor = cc.negative || colors.chartNegative || colors.error;
+            <>
+              {/* Preview grande: se actualiza al tocar cualquier tarjeta para
+                  ver cómo quedaría el gráfico con ese par de colores */}
+              {(() => {
+                const previewPair =
+                  chart.allChartColors.find((c) => c.id === chartPreviewId) ??
+                  chart.allChartColors.find((c) => c.id === chart.activeChartColorId) ??
+                  chart.allChartColors[0];
+                const pPos = previewPair.positive || colors.chartPositive || colors.success;
+                const pNeg = previewPair.negative || colors.chartNegative || colors.error;
                 return (
-                  <View key={cc.id} style={styles.chartCardWrap}>
-                    <TouchableOpacity
-                      style={[styles.chartCard, active && styles.colorCardActive, !owned && styles.shopCardLocked]}
-                      activeOpacity={0.7}
-                      onPress={async () => {
-                        if (owned) {
-                          await chart.setChartColor(cc.id);
-                            toggleSection("chartColors");
-                        } else {
-                          showAlert(`¿Desbloquear este par?`, `Cuesta ${cc.cost} pts`, [
-                            { text: "Cancelar", style: "cancel" },
-                            { text: "Comprar", style: "default", onPress: async () => {
-                              const result = await chart.purchaseChartColor(cc.id, cc.cost);
-                              if (result.success) {
-                                const pts = await getUserPoints();
-                                setShopPoints(pts);
-                              } else {
-                                showAlert("Error", result.reason || "No se pudo completar la compra.");
-                              }
-                            }},
-                          ]);
-                        }
-                      }}
-                    >
-                      <View style={styles.chartPairSwatch}>
-                        <View style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, backgroundColor: negColor, borderRadius: 5 }} />
-                        <View style={styles.chartDiagonalWrap}>
-                          <View style={{ flex: 1, backgroundColor: posColor }} />
-                          <View style={{ flex: 1 }} />
-                        </View>
+                  <View style={styles.chartPreviewCard}>
+                    <View style={styles.chartPreviewArt}>
+                      <PairBarsChart pos={pPos} neg={pNeg} colors={colors} height={44} barWidth={8} barCount={6} />
+                    </View>
+                    <View style={styles.chartPreviewInfo}>
+                      <BicolorText text={previewPair.name} a={pPos} b={pNeg} style={styles.chartPreviewName} />
+                      <View style={styles.chartPreviewRow}>
+                        <View style={[styles.chartPreviewDot, { backgroundColor: pPos }]} />
+                        <AppText style={styles.chartPreviewHint} disableHorizontalPadding>Ingresos</AppText>
+                        <View style={[styles.chartPreviewDot, { backgroundColor: pNeg }]} />
+                        <AppText style={styles.chartPreviewHint} disableHorizontalPadding>Gastos</AppText>
                       </View>
-                      {active && (
-                        <View style={styles.chartCheckOverlay}>
-                          <Ionicons name="checkmark" size={14} color={colors.surface} />
-                        </View>
-                      )}
-                      {!owned && (
-                        <View style={styles.colorLockOverlay}>
-                          <Ionicons name="lock-closed" size={10} color={colors.surface} />
-                          <AppText style={styles.lockPriceText}>{cc.cost}</AppText>
-                        </View>
-                      )}
-                    </TouchableOpacity>
-                    <AppText style={styles.chartPairName} numberOfLines={1}>{cc.name}</AppText>
+                    </View>
                   </View>
                 );
-              })}
-            </View>
+              })()}
+              <View style={styles.colorGrid}>
+                {chart.allChartColors.map((cc) => {
+                  const owned = cc.cost === 0 || chart.purchasedChartColorIds.has(cc.id);
+                  const active = chart.activeChartColorId === cc.id;
+                  const posColor = cc.positive || colors.chartPositive || colors.success;
+                  const negColor = cc.negative || colors.chartNegative || colors.error;
+                  return (
+                    <View key={cc.id} style={styles.chartCardWrap}>
+                      <TouchableOpacity
+                        style={[styles.chartCard, active && styles.colorCardActive, !owned && styles.shopCardLocked]}
+                        activeOpacity={0.7}
+                        onPress={async () => {
+                          setChartPreviewId(cc.id);
+                          if (owned) {
+                            await chart.setChartColor(cc.id);
+                            toggleSection("chartColors");
+                          } else {
+                            showAlert(`¿Desbloquear este par?`, `Cuesta ${cc.cost} koins`, [
+                              { text: "Cancelar", style: "cancel" },
+                              { text: "Comprar", style: "default", onPress: async () => {
+                                const result = await chart.purchaseChartColor(cc.id, cc.cost);
+                                if (result.success) {
+                                  const pts = await getUserPoints();
+                                  setShopPoints(pts);
+                                } else {
+                                  showAlert("Error", result.reason || "No se pudo completar la compra.");
+                                }
+                              }},
+                            ]);
+                          }
+                        }}
+                      >
+                        <View style={styles.chartPairSwatch}>
+                          <PairBarsChart pos={posColor} neg={negColor} colors={colors} height={40} barWidth={4} barCount={5} />
+                        </View>
+                        {active && (
+                          <View style={styles.chartCheckOverlay}>
+                            <Ionicons name="checkmark" size={14} color={colors.surface} />
+                          </View>
+                        )}
+                        {!owned && (
+                          <View style={styles.colorLockOverlay}>
+                            <PriceOverlay cost={cc.cost} colors={colors} />
+                          </View>
+                        )}
+                      </TouchableOpacity>
+                      <BicolorText text={cc.name} a={posColor} b={negColor} style={styles.chartPairName} />
+                    </View>
+                  );
+                })}
+              </View>
+            </>
           )}
 
           {/* Capa de movimiento */}
@@ -908,7 +1009,7 @@ export default function ShopScreen() {
                           await movement.setMovementLayer(m.id);
                           toggleSection("movement");
                         } else {
-                          showAlert(`¿Desbloquear "${m.name}"?`, `Cuesta ${m.cost} pts`, [
+                          showAlert(`¿Desbloquear "${m.name}"?`, `Cuesta ${m.cost} koins`, [
                             { text: "Cancelar", style: "cancel" },
                             { text: "Comprar", style: "default", onPress: async () => {
                               const result = await movement.purchaseMovementLayer(m.id, m.cost);
@@ -934,9 +1035,8 @@ export default function ShopScreen() {
                         {!owned && (
                           <>
                             <View style={StyleSheet.absoluteFill}>
-                              <View style={{ flex: 1, borderRadius: 22, backgroundColor: "rgba(0,0,0,0.35)", alignItems: "center", justifyContent: "center", gap: 1 }}>
-                                <Ionicons name="lock-closed" size={12} color="#fff" />
-                                <AppText style={{ fontSize: 9, fontWeight: "800", color: "#fff" }}>{m.cost}</AppText>
+                              <View style={{ flex: 1, borderRadius: 22, backgroundColor: "rgba(0,0,0,0.35)", alignItems: "center", justifyContent: "center" }}>
+                                <PriceOverlay cost={m.cost} colors={colors} />
                               </View>
                             </View>
                           </>
@@ -983,7 +1083,7 @@ export default function ShopScreen() {
                           await glow.setGlow(pr.id);
                           toggleSection("glow");
                         } else {
-                          showAlert(`Comprar ${pr.name}`, `¿Desbloquear este brillo por ${pr.cost} pts?`, [
+                          showAlert(`Comprar ${pr.name}`, `¿Desbloquear este brillo por ${pr.cost} koins?`, [
                             { text: "Cancelar", style: "cancel" },
                             { text: "Comprar", style: "default", onPress: async () => {
                               const result = await glow.purchaseGlow(pr.id, pr.cost);
@@ -1011,8 +1111,7 @@ export default function ShopScreen() {
                         )}
                         {!owned && (
                           <View style={styles.colorLockOverlay}>
-                            <Ionicons name="lock-closed" size={10} color={colors.surface} />
-                            <AppText style={styles.lockPriceText}>{pr.cost}</AppText>
+                            <PriceOverlay cost={pr.cost} colors={colors} />
                           </View>
                         )}
                       </View>
@@ -1090,7 +1189,7 @@ export default function ShopScreen() {
         onRequestClose={() => setFeedbackVisible(false)}
       >
         <View style={styles.feedbackOverlay}>
-          <View style={[styles.feedbackCard, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+          <View style={[styles.feedbackCard, { backgroundColor: colors.background, borderColor: colors.border }]}>
             <View style={styles.feedbackHeader}>
               <Ionicons name="bug-outline" size={20} color={colors.primary} />
               <AppText style={[styles.feedbackTitle, { color: colors.textPrimary }]}>Reportar inconsistencia visual</AppText>
@@ -1160,71 +1259,76 @@ export default function ShopScreen() {
         </View>
       </Modal>
 
-      {/* Modal: Información de puntos */}
+      {/* Modal: Información de koins */}
       <Modal
         visible={ptsInfoVisible}
-        animationType="fade"
+        animationType="slide"
         transparent
         onRequestClose={() => setPtsInfoVisible(false)}
       >
-        <View style={styles.ptsOverlay}>
-          <View style={[styles.ptsCard, { backgroundColor: colors.surface, borderColor: colors.border }]}>
-            <View style={styles.ptsCardHeader}>
-              <AppText style={[styles.ptsCardTitle, { color: colors.textPrimary }]}>¿Cómo ganar puntos?</AppText>
+        <TouchableOpacity
+          style={styles.koinsOverlay}
+          activeOpacity={1}
+          onPress={() => setPtsInfoVisible(false)}
+        >
+          <TouchableOpacity
+            style={[styles.koinsSheet, { backgroundColor: colors.background, borderColor: colors.border, paddingBottom: insets.bottom + 16 }]}
+            activeOpacity={1}
+            onPress={() => {}}
+          >
+            <View style={[styles.koinsGrabber, { backgroundColor: colors.border }]} />
+            <View style={[styles.ptsCardHeader, { justifyContent: "flex-end" }]}>
+              <TouchableOpacity onPress={() => setPtsInfoVisible(false)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                <Ionicons name="close" size={22} color={colors.textSecondary} />
+              </TouchableOpacity>
+            </View>
+
+            <ScrollView
+              style={styles.koinsScroll}
+              contentContainerStyle={styles.helpScroll}
+              showsVerticalScrollIndicator={false}
+            >
+            <View style={styles.koinsIntro}>
+              <View style={styles.koinsHero}>
+                <KoinIcon size={76} />
+                <AppText style={{ fontSize: 17, fontWeight: "700", textAlign: "center", marginTop: 8, color: colors.textPrimary }}>
+                  ¿Qué son las koins?
+                </AppText>
+              </View>
+              <AppText style={[styles.ptsHelpText, { color: colors.textSecondary, textAlign: "center" }]}>
+                Las koins son la moneda de la app: se ganan completando tareas, pasos y metas, y se gastan para personalizar todo: temas, fondos, colores, movimientos y brillos.
+              </AppText>
             </View>
 
             <View style={styles.ptsSection}>
-              <AppText style={[styles.ptsSectionTitle, { color: colors.textSecondary }]}>Gana puntos</AppText>
+              <AppText style={[styles.ptsSectionTitle, { color: colors.textSecondary }]}>Cómo ganar koins</AppText>
               <View style={[styles.ptsRow, { borderColor: colors.border }]}>
                 <Ionicons name="checkbox-outline" size={16} color={colors.success} />
                 <AppText style={[styles.ptsRowText, { color: colors.textPrimary }]}>Completar una tarea</AppText>
-                <AppText style={[styles.ptsRowValue, { color: colors.warning }]}>+10 pts</AppText>
+                <AppText style={[styles.ptsRowValue, { color: colors.warning }]}>+10 koins</AppText>
               </View>
               <View style={[styles.ptsRow, { borderColor: colors.border }]}>
                 <Ionicons name="flag-outline" size={16} color={colors.success} />
                 <AppText style={[styles.ptsRowText, { color: colors.textPrimary }]}>Completar un paso de meta</AppText>
-                <AppText style={[styles.ptsRowValue, { color: colors.warning }]}>+5 pts</AppText>
+                <AppText style={[styles.ptsRowValue, { color: colors.warning }]}>+5 koins</AppText>
               </View>
               <View style={[styles.ptsRow, { borderColor: colors.border }]}>
                 <Ionicons name="trophy-outline" size={16} color={colors.success} />
                 <AppText style={[styles.ptsRowText, { color: colors.textPrimary }]}>Finalizar una meta</AppText>
-                <AppText style={[styles.ptsRowValue, { color: colors.warning }]}>+50 pts</AppText>
+                <AppText style={[styles.ptsRowValue, { color: colors.warning }]}>+50 koins</AppText>
               </View>
               <View style={[styles.ptsRow, { borderColor: colors.border }]}>
                 <Ionicons name="bug-outline" size={16} color={colors.success} />
                 <AppText style={[styles.ptsRowText, { color: colors.textPrimary }]}>Reportar problema visual</AppText>
-                <AppText style={[styles.ptsRowValue, { color: colors.warning }]}>+10 pts</AppText>
+                <AppText style={[styles.ptsRowValue, { color: colors.warning }]}>+100 koins</AppText>
               </View>
               <View style={[styles.ptsRow, { borderColor: colors.border }]}>
                 <Ionicons name="gift-outline" size={16} color={colors.success} />
-                <AppText style={[styles.ptsRowText, { color: colors.textPrimary }]}>Puntos gratis (una vez)</AppText>
-                <AppText style={[styles.ptsRowValue, { color: colors.warning }]}>+50 pts</AppText>
+                <AppText style={[styles.ptsRowText, { color: colors.textPrimary }]}>Koins gratis (una vez)</AppText>
+                <AppText style={[styles.ptsRowValue, { color: colors.warning }]}>+150 koins</AppText>
               </View>
             </View>
-
-            <View style={styles.ptsSection}>
-              <AppText style={[styles.ptsSectionTitle, { color: colors.textSecondary }]}>Gasta puntos</AppText>
-              <View style={[styles.ptsRow, { borderColor: colors.border }]}>
-                <Ionicons name="color-palette-outline" size={16} color={colors.primary} />
-                <AppText style={[styles.ptsRowText, { color: colors.textPrimary }]}>Temas y fondos</AppText>
-                <AppText style={[styles.ptsRowValue, { color: colors.textPrimary }]}>50 pts c/u</AppText>
-              </View>
-              <View style={[styles.ptsRow, { borderColor: colors.border }]}>
-                <Ionicons name="radio-button-on-outline" size={16} color={colors.primary} />
-                <AppText style={[styles.ptsRowText, { color: colors.textPrimary }]}>Colores de botón y gráfica</AppText>
-                <AppText style={[styles.ptsRowValue, { color: colors.textPrimary }]}>5 pts c/u</AppText>
-              </View>
-              <View style={[styles.ptsRow, { borderColor: colors.border }]}>
-                <Ionicons name="move-outline" size={16} color={colors.primary} />
-                <AppText style={[styles.ptsRowText, { color: colors.textPrimary }]}>Movimientos</AppText>
-                <AppText style={[styles.ptsRowValue, { color: colors.textPrimary }]}>5-8 pts</AppText>
-              </View>
-              <View style={[styles.ptsRow, { borderColor: colors.border }]}>
-                <Ionicons name="sunny-outline" size={16} color={colors.primary} />
-                <AppText style={[styles.ptsRowText, { color: colors.textPrimary }]}>Brillos</AppText>
-                <AppText style={[styles.ptsRowValue, { color: colors.textPrimary }]}>5-50 pts</AppText>
-              </View>
-            </View>
+            </ScrollView>
 
             <TouchableOpacity
               style={[styles.ptsBtn, { backgroundColor: colors.primary }]}
@@ -1232,8 +1336,8 @@ export default function ShopScreen() {
             >
               <AppText style={styles.ptsBtnText}>Entendido</AppText>
             </TouchableOpacity>
-          </View>
-        </View>
+          </TouchableOpacity>
+        </TouchableOpacity>
       </Modal>
 
       {/* Modal: Guía de la tienda */}
@@ -1244,25 +1348,25 @@ export default function ShopScreen() {
         onRequestClose={() => setShopHelpVisible(false)}
       >
         <View style={styles.ptsOverlay}>
-          <View style={[styles.ptsCard, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+          <View style={[styles.ptsCard, { backgroundColor: colors.background, borderColor: colors.border }]}>
             <View style={styles.ptsCardHeader}>
               <AppText style={[styles.ptsCardTitle, { color: colors.textPrimary }]}>Cómo funciona la tienda</AppText>
             </View>
 
             <ScrollView contentContainerStyle={styles.helpScroll} showsVerticalScrollIndicator={false}>
               <AppText style={[styles.ptsHelpText, { color: colors.textSecondary }]}>
-                Aquí personalizas toda la app: temas, fondos, colores, movimientos y brillos. Todo se consigue con puntos, tu saldo de la app.
+                Aquí personalizas toda la app: temas, fondos, colores, movimientos y brillos. Todo se consigue con koins, tu saldo de la app.
               </AppText>
 
               <View style={styles.ptsSection}>
                 <AppText style={[styles.ptsSectionTitle, { color: colors.textSecondary }]}>Arriba</AppText>
                 <View style={[styles.ptsRow, { borderColor: colors.border }]}>
-                  <Ionicons name="star" size={16} color={colors.warning} />
-                  <AppText style={[styles.ptsRowText, { color: colors.textPrimary }]}>Tu saldo en puntos. Tócalo para ver cómo ganarlos.</AppText>
+                  <KoinIcon size={32} />
+                  <AppText style={[styles.ptsRowText, { color: colors.textPrimary }]}>Tu saldo en koins. Tócalo para ver cómo ganarlos.</AppText>
                 </View>
                 <View style={[styles.ptsRow, { borderColor: colors.border }]}>
                   <Ionicons name="bug-outline" size={16} color={colors.textSecondary} />
-                  <AppText style={[styles.ptsRowText, { color: colors.textPrimary }]}>Reporta un problema visual y gana +10 pts. Cada reporte cuenta una vez.</AppText>
+                  <AppText style={[styles.ptsRowText, { color: colors.textPrimary }]}>Reporta un problema visual y gana +100 koins. Cada reporte cuenta una vez.</AppText>
                 </View>
                 <View style={[styles.ptsRow, { borderColor: colors.border }]}>
                   <Ionicons name="moon-outline" size={16} color={colors.primary} />
@@ -1286,19 +1390,19 @@ export default function ShopScreen() {
                 <AppText style={[styles.ptsSectionTitle, { color: colors.textSecondary }]}>Cards de estilo</AppText>
                 <View style={[styles.ptsRow, { borderColor: colors.border }]}>
                   <Ionicons name="lock-closed-outline" size={16} color={colors.textSecondary} />
-                  <AppText style={[styles.ptsRowText, { color: colors.textPrimary }]}>Candado y precio: no lo tienes. Tocarla pide confirmación para comprar.</AppText>
+                  <AppText style={[styles.ptsRowText, { color: colors.textPrimary }]}>Icono de koins y precio: no lo tienes. Tocarla pide confirmación para comprar.</AppText>
                 </View>
                 <View style={[styles.ptsRow, { borderColor: colors.border }]}>
                   <Ionicons name="hand-left-outline" size={16} color={colors.primary} />
-                  <AppText style={[styles.ptsRowText, { color: colors.textPrimary }]}>Sin candado: ya es tuyo. Un toque lo pone en uso.</AppText>
+                  <AppText style={[styles.ptsRowText, { color: colors.textPrimary }]}>Sin precio: ya es tuyo. Un toque lo pone en uso.</AppText>
                 </View>
                 <View style={[styles.ptsRow, { borderColor: colors.border }]}>
                   <Ionicons name="checkmark-circle-outline" size={16} color={colors.success} />
                   <AppText style={[styles.ptsRowText, { color: colors.textPrimary }]}>Check o marca "Activo": es el que se está usando ahora.</AppText>
                 </View>
                 <View style={[styles.ptsRow, { borderColor: colors.border }]}>
-                  <Ionicons name="color-fill-outline" size={16} color={colors.primary} />
-                  <AppText style={[styles.ptsRowText, { color: colors.textPrimary }]}>En "Color secundario" aparece "+50 pts gratis" una sola vez.</AppText>
+                  <Ionicons name="star-outline" size={16} color={colors.primary} />
+                  <AppText style={[styles.ptsRowText, { color: colors.textPrimary }]}>La card "150 koins gratis" sobre Recomendados se entrega una sola vez y alcanza para un conjunto completo.</AppText>
                 </View>
               </View>
 
@@ -1306,7 +1410,7 @@ export default function ShopScreen() {
                 <AppText style={[styles.ptsSectionTitle, { color: colors.textSecondary }]}>Recomendados</AppText>
                 <View style={[styles.ptsRow, { borderColor: colors.border }]}>
                   <Ionicons name="star-outline" size={16} color={colors.primary} />
-                  <AppText style={[styles.ptsRowText, { color: colors.textPrimary }]}>Combos con un concepto visual que agrupan los seis estilos. Compras solo lo que te falta en un pago.</AppText>
+                  <AppText style={[styles.ptsRowText, { color: colors.textPrimary }]}>Combos con un concepto visual que agrupan los seis estilos. Arriba sale lo que cuesta: tocar la card pide confirmación y compras solo lo que te falta.</AppText>
                 </View>
                 <View style={[styles.ptsRow, { borderColor: colors.border }]}>
                   <Ionicons name="flash-outline" size={16} color={colors.success} />

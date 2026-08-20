@@ -1,10 +1,8 @@
-// Modulo de almacenamiento para la gestion de tareas.
 import { Task, TaskPriority } from "./types";
 
 import { getDb } from "./db";
 import { generateId, normalizeCategory } from "./helpers";
 
-// Obtiene todas las categorias de tareas registradas.
 export async function getTaskCategories(): Promise<string[]> {
   const db = getDb();
   const rows = await db.getAllAsync<{ name: string }>(
@@ -13,7 +11,6 @@ export async function getTaskCategories(): Promise<string[]> {
   return rows.map((r) => r.name);
 }
 
-// Agrega una categoria de tarea si no existe. Retorna la lista actualizada.
 export async function addTaskCategory(name: string): Promise<string[]> {
   const normalized = normalizeCategory(name);
   if (!normalized) return getTaskCategories();
@@ -25,7 +22,6 @@ export async function addTaskCategory(name: string): Promise<string[]> {
   return getTaskCategories();
 }
 
-// Obtiene todas las tareas persistidas, de la mas reciente a la mas antigua.
 export async function getTasks(): Promise<Task[]> {
   const db = getDb();
   const rows = await db.getAllAsync<{
@@ -50,7 +46,6 @@ export async function getTasks(): Promise<Task[]> {
   }));
 }
 
-// Crea una tarea pendiente con los campos proporcionados. Retorna el ID generado.
 export async function addTask(
   title: string,
   priority: TaskPriority = "medium",
@@ -67,7 +62,6 @@ export async function addTask(
   return id;
 }
 
-// Actualiza los campos editables de una tarea existente.
 export async function updateTask(
   id: string,
   updates: {
@@ -111,7 +105,6 @@ export async function updateTask(
   );
 }
 
-// Alterna el estado completado de una tarea existente.
 export async function toggleTask(id: string): Promise<void> {
   const db = getDb();
   await db.runAsync(
@@ -120,7 +113,6 @@ export async function toggleTask(id: string): Promise<void> {
   );
 }
 
-// Elimina una tarea por identificador.
 export async function deleteTask(id: string): Promise<void> {
   const db = getDb();
   await db.runAsync("DELETE FROM tasks WHERE id = ?", id);

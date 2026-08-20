@@ -1,15 +1,10 @@
 import { getDb } from "./db";
 
-// Patron de tienda: cada item comprable (temas, fondos, colores, brillos,
-// capas de movimiento) sigue la misma estructura:
-// - settings: guarda el ID activo y un JSON array de IDs comprados
-// - purchaseXxx: withExclusiveTransactionAsync para verificar puntos,
-//   deducir y agregar a la lista de comprados como una sola operacion
-
+// Patrón de tienda compartido por todos los assets (temas, fondos, colores):
+// settings guarda el ID activo y un JSON de IDs comprados; cada compra corre
+// en una transacción exclusiva (verifica puntos, deduce y registra).
 const ACTIVE_THEME_KEY = "active_theme";
 
-// Lee el ID del tema activo desde settings. Retorna "default" si no hay
-// configuracion previa o la clave no existe.
 export async function getActiveTheme(): Promise<string> {
   const db = getDb();
   const row = await db.getFirstAsync<{ value: string }>(
@@ -19,8 +14,6 @@ export async function getActiveTheme(): Promise<string> {
   return row?.value ?? "default";
 }
 
-// Persiste el ID del tema activo. Sobrescribe cualquier valor anterior
-// con INSERT OR REPLACE.
 export async function setActiveTheme(themeId: string): Promise<void> {
   const db = getDb();
   await db.runAsync(
@@ -30,9 +23,6 @@ export async function setActiveTheme(themeId: string): Promise<void> {
   );
 }
 
-// Obtiene el Set de IDs de temas comprados desde settings. Siempre incluye
-// "default" como item gratuito base. Retorna solo {"default"} si no hay
-// registros o el JSON esta corrupto.
 export async function getPurchasedThemeIds(): Promise<Set<string>> {
   const db = getDb();
   const rows = await db.getAllAsync<{ value: string }>(
@@ -47,9 +37,7 @@ export async function getPurchasedThemeIds(): Promise<Set<string>> {
   }
 }
 
-// Compra un tema: verifica puntos, deduce el costo y agrega el ID a la
-// lista de comprados, todo dentro de una transaccion exclusiva para que
-// un crash entre la deduccion y el registro no pierda puntos.
+// Transacción exclusiva: un crash entre deducción y registro no pierde puntos.
 export async function purchaseTheme(
   themeId: string,
   cost: number

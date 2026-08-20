@@ -9,7 +9,6 @@ import {
   toggleGoalStep,
   completeGoal,
   deleteGoal as storageDeleteGoal,
-  getUserPoints,
   reorderGoals as storageReorderGoals,
   updateGoal as storageUpdateGoal,
   markInstallment as storageMarkInstallment,
@@ -23,7 +22,6 @@ import {
 // Incluye el sistema de puntos del usuario. Retorna estado y funciones de interacción de Metas.
 export function useGoals() {
   const [goals, setGoals] = useState<Goal[]>([]);
-  const [userPoints, setUserPoints] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -31,9 +29,8 @@ export function useGoals() {
     try {
       setIsLoading(true);
       setError(null);
-      const [data, pts] = await Promise.all([getGoals(), getUserPoints()]);
+      const data = await getGoals();
       setGoals(data);
-      setUserPoints(pts);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Error al cargar las metas.");
     } finally {
@@ -177,7 +174,6 @@ export function useGoals() {
 
   return {
     goals,
-    userPoints,
     isLoading,
     error,
     setError,

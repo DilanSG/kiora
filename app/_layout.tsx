@@ -4,7 +4,6 @@ import { StatusBar } from "expo-status-bar";
 import { TouchableOpacity, View } from "react-native";
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import * as Notifications from "expo-notifications";
 import { ThemeProvider, useTheme, useThemeMode } from "../lib/theme";
 import { getUserName, getTasks } from "../lib/storage";
 import { initDatabase } from "../lib/storage/db";
@@ -18,10 +17,13 @@ import { AlertProvider } from "../components/ui/AlertModal";
 import { KeyboardProvider } from "../components/ui/KeyboardAvoiding";
 import HintSheet from "../components/ui/HintSheet";
 import { configureNotificationHandler, rescheduleAllReminders } from "../lib/notifications/taskReminders";
+import { loadNotifications } from "../lib/notifications/loader";
+import { requestPermissionsOnFirstLaunch } from "../lib/permissions";
+import { runDatabaseMaintenance } from "../lib/storage/backup";
+import { syncNavigationBarButtons } from "../lib/native/navigationBar";
 
 const DrawerContext = createContext<{ open: () => void }>({ open: () => {} });
 
-// Boton de menu del header principal. Abre el drawer global usando el contexto compartido.
 function MenuButton() {
   const colors = useTheme();
   const { open } = useContext(DrawerContext);
@@ -36,7 +38,6 @@ function MenuButton() {
   );
 }
 
-// Punto de entrada de la app. Envuelve la navegacion en el ThemeProvider para exponer colores y modo de tema.
 export default function RootLayout() {
   // Tras un borrado de datos, el resetKey remonta todo el arbol (providers
   // incluidos) y la app arranca de nuevo con la base de datos ya limpia.
@@ -73,24 +74,33 @@ function RootContent() {
   const notificationResponseRef = useRef(false);
 
   useEffect(() => {
-    configureNotificationHandler();
+    let disposed = false;
+    let sub: { remove: () => void } | null = null;
+    void (async () => {
+      const Notifications = await loadNotifications();
+      if (!Notifications || disposed) return;
+      void configureNotificationHandler();
+      sub = Notifications.addNotificationResponseReceivedListener((response) => {
+        const data = response.notification.request.content.data;
+        if (data?.screen === "tasks") {
+          // Navegar a tareas al tocar la notificacion.
+          // setTimeout para que el navigation container termine de montarse.
+          setTimeout(() => {
+            router.push("/tasks");
+          }, 500);
+        }
+      });
+    })();
 
-    const sub = Notifications.addNotificationResponseReceivedListener((response) => {
-      const data = response.notification.request.content.data;
-      if (data?.screen === "tasks") {
-        // Navegar a tareas al tocar la notificacion.
-        // setTimeout para que el navigation container termine de montarse.
-        setTimeout(() => {
-          router.push("/tasks");
-        }, 500);
-      }
-    });
-
-    return () => sub.remove();
+    return () => {
+      disposed = true;
+      sub?.remove();
+    };
   }, []);
 
   useEffect(() => {
     initDatabase()
+      .then(() => runDatabaseMaintenance())
       .then(() => getUserName())
       .then((name) => {
         setUserName(name ?? null);
@@ -98,12 +108,18 @@ function RootContent() {
       });
   }, []);
 
-  // Reagendar recordatorios al arrancar
   useEffect(() => {
     if (!ready || notificationResponseRef.current) return;
     notificationResponseRef.current = true;
     getTasks().then((tasks) => rescheduleAllReminders(tasks)).catch((err: unknown) => console.error("rescheduleAllReminders failed", err));
   }, [ready]);
+
+  // Pedir todos los permisos runtime al primer arranque con sesión (SMS,
+  // notificaciones, calendario y fotos). El flag en SQLite evita repetir.
+  useEffect(() => {
+    if (!ready || !userName) return;
+    requestPermissionsOnFirstLaunch();
+  }, [ready, userName]);
 
   // Garantiza que el splash se vea al menos 1500ms para evitar un parpadeo
   // cuando la DB se inicializa muy rapido (ej. en caliente con HMR).
@@ -125,6 +141,12 @@ function RootContent() {
   const closeDrawer = useCallback(() => setDrawerOpen(false), []);
 
   const statusBarStyle = isDark ? "light" : "dark";
+
+  // Sincroniza el color de los botones de la barra de navegación con el tema
+  // actual (oscuro => botones claros, claro => botones oscuros).
+  useEffect(() => {
+    syncNavigationBarButtons(isDark);
+  }, [isDark]);
 
   let content: ReactNode;
 
@@ -176,7 +198,7 @@ function RootContent() {
                   title="Balances"
                   lines={[
                     "Deslizar el gráfico o tocar Semana / Mes / Año cambia el período; las flechas permiten navegar entre fechas.",
-                    "El botón + agrega un gasto, un ingreso o un movimiento recurrente, y tocar cualquier movimiento permite editarlo.",
+                    "El botón + agrega un gasto, un ingreso o un movimiento recurrente; tocar cualquier movimiento abre su detalle con toda la información, y mantener la tarjeta presionada lo edita.",
                     "Importar carga movimientos desde el flujo n8n o los SMS del banco; el interruptor de ahorro muestra esa línea en el gráfico.",
                   ]}
                   sections={[
@@ -208,7 +230,7 @@ function RootContent() {
                 <HintSheet
                   title="Tareas"
                   lines={[
-                    "Tocar el recuadro a la izquierda completa una tarea y otorga 10 puntos.",
+                    "Tocar el recuadro a la izquierda completa una tarea y otorga 10 koins.",
                     "Tocar la tarjeta muestra el detalle y sus notas vinculadas; mantenerla presionada permite editarla.",
                     "El botón + crea una tarea: si se le asigna fecha o recordatorio, la aplicación avisa automáticamente.",
                   ]}
@@ -217,7 +239,7 @@ function RootContent() {
                       title: "Prioridades",
                       lines: [
                         "Cada tarea tiene una prioridad (alta, media o baja) que se marca con un punto de color en la tarjeta.",
-                        "Sirven para ordenar y filtrar la vista, pero no alteran los puntos: completar cualquier tarea siempre otorga 10.",
+                        "Sirven para ordenar y filtrar la vista, pero no alteran las koins: completar cualquier tarea siempre otorga 10.",
                       ],
                     },
                     {
@@ -290,7 +312,7 @@ function RootContent() {
                   lines={[
                     "Tocar una meta abre su detalle, donde se pueden registrar aportes, marcar pasos y consultar sus notas vinculadas.",
                     "Mantener presionada la tarjeta de una meta abre la barra de opciones: editar, eliminar o cambiar el orden.",
-                    "Completar pasos y metas otorga puntos que pueden utilizarse en la tienda de Ajustes.",
+                    "Completar pasos y metas otorga koins que pueden utilizarse en la tienda de Ajustes.",
                   ]}
                   sections={[
                     {
@@ -322,13 +344,13 @@ function RootContent() {
                 <HintSheet
                   title="Ajustes"
                   lines={[
-                    "Aquí se gestiona el perfil: nombre, sincronización con n8n, tema de la app y datos. La tienda de puntos es una pantalla aparte (icono de tienda en Inicio o la tarjeta Personalización).",
+                    "Aquí se gestiona el perfil: nombre, sincronización con n8n, tema de la app y datos. La tienda de koins es una pantalla aparte (icono de tienda en Inicio o la tarjeta Personalización).",
                   ]}
                   sections={[
                     {
-                      title: "Tienda de puntos",
+                      title: "Tienda de koins",
                       lines: [
-                        "Los puntos se ganan completando tareas (+10), pasos o metas, y al reportar un error.",
+                        "Las koins se ganan completando tareas (+10), pasos o metas, y al reportar un error.",
                         "Se canjean por temas de color: cada tema tiene un costo fijo y queda equipado después de comprarlo.",
                       ],
                     },
@@ -348,6 +370,16 @@ function RootContent() {
               cabecera se dibuja dentro de shop.tsx (título compacto arriba). */}
           <Tabs.Screen
             name="shop"
+            options={{
+              href: null,
+              headerShown: false,
+              tabBarStyle: { display: "none" },
+            }}
+          />
+          {/* Dev: pantalla de desarrollador, también oculta de las pestañas.
+              Se abre desde el trigger invisible del footer de Ajustes. */}
+          <Tabs.Screen
+            name="dev"
             options={{
               href: null,
               headerShown: false,

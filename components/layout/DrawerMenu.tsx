@@ -11,6 +11,7 @@ import { useRouter, usePathname } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { useTheme, ThemeColors } from "../../lib/theme";
 import { getUserName } from "../../lib/storage";
+import { useSafeBottom } from "../../hooks/useSafeBottom";
 import AppText from "../ui/AppText";
 
 type Props = {
@@ -21,7 +22,8 @@ type Props = {
 // Menú lateral / Drawer personalizado para la navegación principal y acciones rápidas.
 export default function DrawerMenu({ visible, onClose }: Props) {
   const colors = useTheme();
-  const styles = getStyles(colors);
+  const bottomPad = useSafeBottom();
+  const styles = getStyles(colors, bottomPad);
   const router = useRouter();
   const pathname = usePathname();
   const [userName, setUserNameLocal] = useState<string>("");
@@ -140,7 +142,7 @@ export default function DrawerMenu({ visible, onClose }: Props) {
   );
 }
 
-const getStyles = (colors: ThemeColors) =>
+const getStyles = (colors: ThemeColors, bottomPad = 0) =>
   StyleSheet.create({
     overlay: {
       flex: 1,
@@ -154,7 +156,7 @@ const getStyles = (colors: ThemeColors) =>
       borderRightWidth: 1,
       borderRightColor: colors.border,
       paddingTop: Platform.OS === "ios" ? 54 : 34,
-      paddingBottom: 24,
+      paddingBottom: 24 + bottomPad,
       paddingHorizontal: 16,
     },
     profileHeader: {

@@ -29,6 +29,7 @@ import { addNote as storageAddNote } from "../lib/storage/notes";
 import NoteModal from "../components/features/notes/NoteModal";
 import NoteDetailView from "../components/features/notes/NoteDetailView";
 import { CalendarPicker } from "../components/ui/CalendarPicker";
+import { useSafeBottom } from "../hooks/useSafeBottom";
 
 type FilterStatus = "all" | "pending" | "completed";
 type FilterPriority = "all" | TaskPriority;
@@ -64,6 +65,7 @@ const QUICK_DATES = [
 export default function TasksScreen() {
   const colors = useTheme();
   const styles = getStyles(colors);
+  const bottomPad = useSafeBottom();
   const { tasks, addTask, updateTask, toggleTask, deleteTask } = useTasks();
 
   const priorityOptions = useMemo(() => [
@@ -201,7 +203,7 @@ export default function TasksScreen() {
   };
 
   const handleToggle = (id: string) => {
-    showAlert("Completar tarea", "¿Marcar como completada? Obtendrás 10 puntos.", [
+    showAlert("Completar tarea", "¿Marcar como completada? Obtendrás 10 koins.", [
       { text: "Cancelar", style: "cancel" },
       {
         text: "Completar",
@@ -378,18 +380,22 @@ export default function TasksScreen() {
           />
         }
         style={{ flex: 1 }}
-        contentContainerStyle={styles.list}
+        contentContainerStyle={[styles.list, { paddingBottom: bottomPad + 100 }]}
       />
 
       {/* FAB */}
-      <TouchableOpacity style={styles.fab} onPress={openCreate} activeOpacity={0.8}>
+      <TouchableOpacity
+        style={[styles.fab, { bottom: bottomPad + 20 }]}
+        onPress={openCreate}
+        activeOpacity={0.8}
+      >
         <Ionicons name="add" size={28} color={colors.surface} />
       </TouchableOpacity>
 
       {/* Create/Edit Modal */}
       <Modal visible={modalVisible} transparent animationType="slide" onRequestClose={() => setModalVisible(false)}>
         <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
+          <View style={[styles.modalContent, { paddingBottom: (Platform.OS === "ios" ? 36 : 24) + bottomPad }]}>
             <View style={styles.modalHeader}>
               <AppText style={styles.modalTitle} disableHorizontalPadding>
                 {editingTask ? "Editar tarea" : "Nueva tarea"}

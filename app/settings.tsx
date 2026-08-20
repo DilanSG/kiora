@@ -17,12 +17,15 @@ import {
   syncFromN8n,
   getUserName,
   setUserName,
-  areAllStylesUnlocked,
   clearStyleData,
   clearFinanceData,
   getDataCounts,
+  flushMaterializeChain,
+  getUserPoints,
 } from "../lib/storage";
-import { useTheme, useThemeMode, useThemeShop, useBackgroundShop, useButtonColorShop, useChartColorShop, useMovementLayerShop, useGlowShop, useGlow, useUnlockAllStyles, ThemeColors, ThemeMode } from "../lib/theme";
+import { hasRedeemedSecretCode, redeemSecretCode } from "../lib/storage/helpers";
+import { KoinIcon } from "../components/brand/KoinIcon";
+import { useTheme, useThemeMode, useThemeShop, useBackgroundShop, useButtonColorShop, useChartColorShop, useMovementLayerShop, useGlowShop, useGlow, ThemeColors, ThemeMode } from "../lib/theme";
 import { getStyles } from "../lib/settings-styles";
 import { APP_INFO } from "../constants";
 import BackgroundDecor from "../components/ui/BackgroundDecor";
@@ -30,7 +33,9 @@ import AppText from "../components/ui/AppText";
 import GlowView from "../components/ui/GlowView";
 import { useAlert } from "../components/ui/AlertModal";
 import { requestAppRestart } from "../lib/app-restart";
+import { openDevMenu } from "../components/dev/DevMenu";
 import { clearReadNotifications, deleteOldNotifications } from "../lib/storage/notifications";
+import { useSafeBottom } from "../hooks/useSafeBottom";
 
 const THEME_OPTIONS: { value: ThemeMode; label: string; icon: keyof typeof Ionicons.glyphMap }[] = [
   { value: "light", label: "Claro", icon: "sunny" },
@@ -40,6 +45,7 @@ const THEME_OPTIONS: { value: ThemeMode; label: string; icon: keyof typeof Ionic
 
 export default function SettingsScreen() {
   const colors = useTheme();
+  const bottomPad = useSafeBottom();
   const { mode, setMode, isDark } = useThemeMode();
   const { activeVariantId, purchasedIds, equipTheme, purchaseTheme, refreshPurchased, allThemes } = useThemeShop();
   const {
@@ -83,7 +89,7 @@ export default function SettingsScreen() {
   const GLOW_CARD_SIZE = COLOR_CARD_SIZE;
   const CHART_CARD_SIZE = (SCREEN_WIDTH - 24 - 30) / 5;
 
-  const styles = getStyles(colors, COLOR_CARD_SIZE, CHART_CARD_SIZE, GLOW_CARD_SIZE);
+  const styles = getStyles(colors, COLOR_CARD_SIZE, CHART_CARD_SIZE, GLOW_CARD_SIZE, bottomPad);
 
   const [syncUrl, setSyncUrl] = useState("");
   const [syncKey, setSyncKey] = useState("");
@@ -97,20 +103,36 @@ export default function SettingsScreen() {
 
   const [unlockVisible, setUnlockVisible] = useState(false);
   const [codeParts, setCodeParts] = useState(["", "", "", ""]);
+  // Un solo Modal con dos pasos: "code" (4 pares) y "reward" (badge + "+2000").
+  // Cambiar de paso sin cerrar/reabrir el Modal evita la carrera de Dialogs
+  // de Android, que hacía aparecer el segundo modal lento o sin recibir toques.
+  const [unlockStep, setUnlockStep] = useState<"code" | "reward">("code");
+  const [collecting, setCollecting] = useState(false);
+  const [collected, setCollected] = useState(false);
+  const [rewardKoins, setRewardKoins] = useState(0);
+  // Modal de aviso cuando el código ya fue canjeado antes.
+  const [alreadyVisible, setAlreadyVisible] = useState(false);
+  // Flag cacheado del canje para que el toque al footer responda al instante,
+  // sin esperar una consulta a la DB en cada tap.
+  const [secretRedeemed, setSecretRedeemed] = useState<boolean | null>(null);
   const [deleteSheetVisible, setDeleteSheetVisible] = useState(false);
   const [deletePlan, setDeletePlan] = useState<"styles" | "finance" | "all" | null>(null);
   const [deleteCounts, setDeleteCounts] = useState<Record<string, number>>({});
   const [deleteFinalKind, setDeleteFinalKind] = useState<"styles" | "finance" | "all">("all");
   const [deleteConfirmVisible, setDeleteConfirmVisible] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [deleteProgress, setDeleteProgress] = useState<{ label: string; done: number; total: number } | null>(null);
   const [syncExpanded, setSyncExpanded] = useState(false);
   // Indica si hay config de sincronización cargada (URL o API Key) para el indicador del acordeón.
   const syncConfigured = Boolean(syncUrl.trim() || syncKey.trim());
   const codeInputsRef = useRef<Array<TextInput | null>>([]);
-  const unlockAllStyles = useUnlockAllStyles();
 
   // Al volver de la Tienda (/shop) las compras y equipamientos recién hechos
   // quedan en la DB: refrescar las seis tiendas para que esta pantalla las vea.
+  // Deps SOLO con las funciones estables: chart/movement/glow son objetos que
+  // el ThemeProvider recrea en cada render, y meterlos aquí disparaba un bucle
+  // infinito (effect -> setPurchasedIds -> re-render -> effect) con lecturas
+  // eternas de settings en la cola de la DB.
   useFocusEffect(
     useCallback(() => {
       refreshPurchased();
@@ -119,7 +141,8 @@ export default function SettingsScreen() {
       chart.refreshPurchasedChartColors();
       movement.refreshPurchasedMovementLayers();
       glow.refreshPurchasedGlow();
-    }, [refreshPurchased, refreshPurchasedBackgrounds, refreshPurchasedButtonColors, chart, movement, glow])
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [refreshPurchased, refreshPurchasedBackgrounds, refreshPurchasedButtonColors])
   );
 
   useEffect(() => {
@@ -132,6 +155,7 @@ export default function SettingsScreen() {
       setSavedName(value);
       setNameInput(value);
     });
+    hasRedeemedSecretCode().then(setSecretRedeemed);
   }, []);
 
   const handleSaveName = async () => {
@@ -179,8 +203,6 @@ export default function SettingsScreen() {
     }
   };
 
-  // Flujo de borrado: bottom sheet con 3 opciones -> vista con la lista de
-  // lo que se eliminara (Volver / Aceptar) -> confirmacion final.
   const openDeleteList = async (kind: "styles" | "finance" | "all") => {
     setDeleteSheetVisible(false);
     setDeletePlan(kind);
@@ -197,9 +219,22 @@ export default function SettingsScreen() {
 
   const executeDelete = async () => {
     setDeleting(true);
+    // Progreso visible desde el primer instante: sin esto, mientras el flush
+    // de materializaciones corre el modal solo muestra "Borrando..." y parece
+    // congelado. El paso 0 (Preparando) da feedback antes del primer DELETE.
+    const totalSteps = deleteFinalKind === "styles" ? 8 : deleteFinalKind === "finance" ? 3 : 13;
+    setDeleteProgress({ label: "Preparando…", done: 0, total: totalSteps });
     try {
+      // Espera a que terminen las materializaciones de recurrentes en vuelo
+      // (acotado a 4s: si tardan más, el retry de "database is locked" de la
+      // cola de la DB cubre el lock y el borrado continúa igual).
+      await Promise.race([
+        flushMaterializeChain(),
+        new Promise((resolve) => setTimeout(resolve, 4000)),
+      ]);
+      const reportProgress = (p: { label: string; done: number; total: number }) => setDeleteProgress(p);
       if (deleteFinalKind === "styles") {
-        await clearStyleData();
+        await clearStyleData(reportProgress);
         await Promise.all([
           refreshPurchased(),
           refreshPurchasedBackgrounds(),
@@ -208,11 +243,10 @@ export default function SettingsScreen() {
           movement.refreshPurchasedMovementLayers(),
           glow.refreshPurchasedGlow(),
         ]);
-        // Los puntos vuelven a 0 en la DB; al reiniciar la app los hooks lo reflejan.
       } else if (deleteFinalKind === "finance") {
-        await clearFinanceData();
+        await clearFinanceData(reportProgress);
       } else {
-        await clearAllData();
+        await clearAllData(reportProgress);
         // Los puntos vuelven a 0 en la DB; al reiniciar la app los hooks lo reflejan.
       }
       setDeleteConfirmVisible(false);
@@ -223,10 +257,10 @@ export default function SettingsScreen() {
       const msg = e instanceof Error ? e.message : "Error desconocido.";
       showAlert("Error", msg);
       setDeleting(false);
+      setDeleteProgress(null);
     }
   };
 
-  // Pide confirmación y borra las notificaciones leídas de la app.
   const handleClearReadNotifications = () => {
     showAlert("Limpiar notificaciones", "¿Borrar todas las notificaciones leídas?", [
       { text: "Cancelar", style: "cancel" },
@@ -245,7 +279,6 @@ export default function SettingsScreen() {
     ]);
   };
 
-  // Pide confirmación y purga notificaciones con más de 30 días de antigüedad.
   const handlePurgeOldNotifications = () => {
     showAlert("Limpiar antiguas", "¿Borrar las notificaciones de hace más de 30 días?", [
       { text: "Cancelar", style: "cancel" },
@@ -264,9 +297,20 @@ export default function SettingsScreen() {
     ]);
   };
 
-  // Código secreto: 4 pares de 2 dígitos -> "17-13-14-08". En el acierto
-  // desbloquea todas las tiendas; en el error solo muestra feedback.
+  // Cierra el modal del código y deja el paso en "code" para la próxima vez.
+  const closeUnlock = () => {
+    setUnlockVisible(false);
+    setUnlockStep("code");
+    setCodeParts(["", "", "", ""]);
+    setCollected(false);
+  };
+
+  // Código secreto: 4 pares de 2 dígitos -> "17-13-14-08". En el acierto no
+  // canjea aún: cambia al paso de recompensa y el botón "+2000" entrega los
+  // koins (así cerrar con X no gasta el canje único). El swap es inmediato:
+  // la badge se rellena en segundo plano para que el modal no espere a la DB.
   const handleUnlockSubmit = async () => {
+    const t0 = Date.now();
     const joined = codeParts.join("");
     if (joined.length !== 8) {
       showAlert("Código incompleto", "Completá los 4 números de 2 dígitos.");
@@ -277,10 +321,40 @@ export default function SettingsScreen() {
       setCodeParts(["", "", "", ""]);
       return;
     }
-    await unlockAllStyles();
-    setUnlockVisible(false);
     setCodeParts(["", "", "", ""]);
-    showAlert("Todo desbloqueado", "Todos los temas, fondos, colores, movimientos y brillos ya están disponibles.");
+    setRewardKoins(-1); // placeholder: la badge muestra "..." hasta cargar
+    setUnlockStep("reward");
+    const t1 = Date.now();
+    console.log(`[unlock] swap reward en ${t1 - t0}ms`);
+    getUserPoints()
+      .then((pts) => setRewardKoins(pts))
+      .catch(() => setRewardKoins(0));
+    const t2 = Date.now();
+    console.log(`[unlock] getUserPoints resuelto en ${t2 - t1}ms`);
+  };
+
+  // El botón "+2000" del paso de recompensa: entrega los koins con feedback
+  // inmediato (la badge suma al instante y se marca como canjeado). Si el
+  // canje falla, se revierte el total y se avisa. Cerrar con la X antes no
+  // entrega nada y el canje único queda intacto.
+  const handleCollectKoins = async () => {
+    if (collecting || collected) return;
+    setCollecting(true);
+    const prev = rewardKoins;
+    setRewardKoins((k) => (k >= 0 ? k + 2000 : 2000));
+    setCollected(true);
+    setSecretRedeemed(true);
+    try {
+      await redeemSecretCode(2000);
+      console.log("[unlock] redeemSecretCode ok");
+    } catch (e: unknown) {
+      setRewardKoins(prev);
+      setCollected(false);
+      setSecretRedeemed(false);
+      showAlert("Error", e instanceof Error ? e.message : "Error desconocido.");
+    } finally {
+      setCollecting(false);
+    }
   };
 
   const handleCodeChange = (index: number, text: string) => {
@@ -293,16 +367,18 @@ export default function SettingsScreen() {
     }
   };
 
-  // Si todo ya esta desbloqueado, el toque al footer no muestra el input:
-  // solo avisa. Un codigo correcto se puede ingresar una sola vez.
+  // El código secreto se puede canjear una sola vez. Con el flag cacheado el
+  // toque responde al instante: si ya se usó, sale el modal de aviso sin
+  // volver a pedir el código; si no, abre el input. Solo si el flag aún no
+  // cargó (primer tap muy temprano) se consulta la DB en el momento.
   const handleFooterTap = useCallback(async () => {
-    const unlocked = await areAllStylesUnlocked();
-    if (unlocked) {
-      showAlert("Todo desbloqueado", "Ya todos los temas, fondos, colores, movimientos y brillos estan disponibles.");
+    const redeemed = secretRedeemed ?? (await hasRedeemedSecretCode());
+    if (redeemed) {
+      setAlreadyVisible(true);
     } else {
       setUnlockVisible(true);
     }
-  }, [showAlert]);
+  }, [secretRedeemed]);
 
   return (
     <View style={styles.container}>
@@ -404,7 +480,7 @@ export default function SettingsScreen() {
         </View>
 
         {/* Personalización */}
-        <TouchableOpacity style={[styles.newCard, glowStyle]} onPress={() => router.push("/shop")} activeOpacity={0.85}>
+        <TouchableOpacity style={[styles.newCard, glowStyle]} onPress={() => router.push({ pathname: "/shop", params: { from: "settings" } })} activeOpacity={0.85}>
           <View style={styles.newCardHeader}>
             <View style={styles.newCardIcon}>
               <Ionicons name="color-palette-outline" size={18} color={colors.primary} />
@@ -414,63 +490,84 @@ export default function SettingsScreen() {
           </View>
           {hasActiveProps && <View style={styles.newCardDivider} />}
           {hasActiveProps && (
-            <View style={styles.newCardGrid}>
+            <View style={styles.newCardList}>
               {activeVariantId !== "default" && (
-              <View style={styles.newCardCell}>
-                <AppText style={styles.newCardLabel}>TEMA</AppText>
-                <AppText style={styles.newCardValue}>
-                  {allThemes.find((t) => t.id === activeVariantId)?.name ?? activeVariantId}
-                </AppText>
-              </View>
-            )}
-            {activeBackgroundId && activeBackgroundId !== "flat" && (
-              <View style={styles.newCardCell}>
-                <AppText style={styles.newCardLabel}>FONDO</AppText>
-                <AppText style={styles.newCardValue}>
-                  {allBackgrounds.find((b) => b.id === activeBackgroundId)?.name ?? activeBackgroundId}
-                </AppText>
-              </View>
-            )}
-            {(mode === "light" || mode === "dark") && (
-              <View style={styles.newCardCell}>
-                <AppText style={styles.newCardLabel}>MODO</AppText>
-                <AppText style={styles.newCardValue}>{mode === "light" ? "Claro" : "Oscuro"}</AppText>
-              </View>
-            )}
-            {activeButtonColorId !== "default" && (
-              <View style={styles.newCardCell}>
-                <AppText style={styles.newCardLabel}>COLOR</AppText>
-                <AppText style={styles.newCardValue}>
-                  {capitalize(activeButtonColorId)}
-                </AppText>
-              </View>
-            )}
-            {chart.activeChartColorId !== "default" && (
-              <View style={styles.newCardCell}>
-                <AppText style={styles.newCardLabel}>GRÁFICA</AppText>
-                <AppText style={styles.newCardValue}>
-                  {chart.allChartColors.find((c) => c.id === chart.activeChartColorId)?.name ?? ""}
-                </AppText>
-              </View>
-            )}
-            {movement.movementLayerId !== "none" && (
-              <View style={styles.newCardCell}>
-                <AppText style={styles.newCardLabel}>MOVIMIENTO</AppText>
-                <AppText style={styles.newCardValue}>
-                  {movement.allMovementLayers.find((m) => m.id === movement.movementLayerId)?.name ?? ""}
-                </AppText>
-              </View>
-            )}
-            {glow.glowId !== "none" && (
-              <View style={styles.newCardCell}>
-                <AppText style={styles.newCardLabel}>BRILLO</AppText>
-                <AppText style={[styles.newCardValue, { color: glowColor(glow.glowId) }]}>
-                  {glow.allGlowPresets.find((g) => g.id === glow.glowId)?.name ?? "Brillo"}
-                </AppText>
-              </View>
-            )}
-          </View>
-            )}
+                <View style={styles.newCardRow}>
+                  <View style={[styles.newCardRowIcon, { backgroundColor: colors.primary + "12" }]}>
+                    <Ionicons name="color-palette-outline" size={15} color={colors.primary} />
+                  </View>
+                  <AppText style={styles.newCardLabel}>Tema</AppText>
+                  <AppText style={styles.newCardValue}>
+                    {allThemes.find((t) => t.id === activeVariantId)?.name ?? activeVariantId}
+                  </AppText>
+                </View>
+              )}
+              {activeBackgroundId && activeBackgroundId !== "flat" && (
+                <View style={styles.newCardRow}>
+                  <View style={[styles.newCardRowIcon, { backgroundColor: colors.primary + "12" }]}>
+                    <Ionicons name="grid-outline" size={15} color={colors.primary} />
+                  </View>
+                  <AppText style={styles.newCardLabel}>Fondo</AppText>
+                  <AppText style={styles.newCardValue}>
+                    {allBackgrounds.find((b) => b.id === activeBackgroundId)?.name ?? activeBackgroundId}
+                  </AppText>
+                </View>
+              )}
+              {(mode === "light" || mode === "dark") && (
+                <View style={styles.newCardRow}>
+                  <View style={[styles.newCardRowIcon, { backgroundColor: colors.primary + "12" }]}>
+                    <Ionicons name={mode === "light" ? "sunny-outline" : "moon-outline"} size={15} color={colors.primary} />
+                  </View>
+                  <AppText style={styles.newCardLabel}>Modo</AppText>
+                  <AppText style={styles.newCardValue}>{mode === "light" ? "Claro" : "Oscuro"}</AppText>
+                </View>
+              )}
+              {activeButtonColorId !== "default" && (
+                <View style={styles.newCardRow}>
+                  <View style={[styles.newCardRowIcon, { backgroundColor: colors.primary + "12" }]}>
+                    <Ionicons name="color-fill-outline" size={15} color={colors.primary} />
+                  </View>
+                  <AppText style={styles.newCardLabel}>Color</AppText>
+                  <AppText style={styles.newCardValue}>
+                    {capitalize(activeButtonColorId)}
+                  </AppText>
+                </View>
+              )}
+              {chart.activeChartColorId !== "default" && (
+                <View style={styles.newCardRow}>
+                  <View style={[styles.newCardRowIcon, { backgroundColor: colors.primary + "12" }]}>
+                    <Ionicons name="stats-chart-outline" size={15} color={colors.primary} />
+                  </View>
+                  <AppText style={styles.newCardLabel}>Gráfica</AppText>
+                  <AppText style={styles.newCardValue}>
+                    {chart.allChartColors.find((c) => c.id === chart.activeChartColorId)?.name ?? ""}
+                  </AppText>
+                </View>
+              )}
+              {movement.movementLayerId !== "none" && (
+                <View style={styles.newCardRow}>
+                  <View style={[styles.newCardRowIcon, { backgroundColor: colors.primary + "12" }]}>
+                    <Ionicons name="move-outline" size={15} color={colors.primary} />
+                  </View>
+                  <AppText style={styles.newCardLabel}>Movimiento</AppText>
+                  <AppText style={styles.newCardValue}>
+                    {movement.allMovementLayers.find((m) => m.id === movement.movementLayerId)?.name ?? ""}
+                  </AppText>
+                </View>
+              )}
+              {glow.glowId !== "none" && (
+                <View style={styles.newCardRow}>
+                  <View style={[styles.newCardRowIcon, { backgroundColor: colors.primary + "12" }]}>
+                    <Ionicons name="sunny-outline" size={15} color={colors.primary} />
+                  </View>
+                  <AppText style={styles.newCardLabel}>Brillo</AppText>
+                  <AppText style={[styles.newCardValue, { color: glowColor(glow.glowId) }]}>
+                    {glow.allGlowPresets.find((g) => g.id === glow.glowId)?.name ?? "Brillo"}
+                  </AppText>
+                </View>
+              )}
+            </View>
+          )}
         </TouchableOpacity>
 
         {/* Sincronización n8n (acordeón) */}
@@ -606,19 +703,21 @@ export default function SettingsScreen() {
       {/* Footer */}
       <View style={styles.footerWrap}>
         <View style={styles.footerRow}>
-          <AppText style={styles.footer} numberOfLines={1}>
-            Made By {APP_INFO.DEVELOPER} ·{" "}
-          </AppText>
-          <TouchableOpacity
-            onPress={handleFooterTap}
-            activeOpacity={0.7}
-            hitSlop={{ top: 6, bottom: 6, left: 4, right: 4 }}
-          >
-            <AppText style={styles.footer}>{APP_INFO.MAINTAINER}</AppText>
+           <AppText style={styles.footer} numberOfLines={1}> Made By</AppText>
+          <TouchableOpacity onPress={handleFooterTap} activeOpacity={0.7} hitSlop={{ top: 6, bottom: 6, left: 4, right: 4 }}>
+          <AppText style={styles.footer} numberOfLines={1}> {" "}{APP_INFO.DEVELOPER} ·{" "}</AppText>
           </TouchableOpacity>
-          <AppText style={styles.footer} numberOfLines={1}>
-            {" "}· v{APP_INFO.VERSION}
-          </AppText>
+          <AppText style={styles.footer}>{APP_INFO.MAINTAINER}</AppText>
+          <AppText style={styles.footer} numberOfLines={1}>{" "}· v{APP_INFO.VERSION}</AppText>
+        </View>
+        {/* Trigger invisible del menu de desarrollador: abajo a la derecha
+            del texto "Made By", solo responde al toque en esa esquina. */}
+        <View pointerEvents="box-none" style={StyleSheet.absoluteFill}>
+          <TouchableOpacity
+            onPress={openDevMenu}
+            activeOpacity={1}
+            style={styles.devTrigger}
+          />
         </View>
       </View>
 
@@ -635,7 +734,7 @@ export default function SettingsScreen() {
             activeOpacity={1}
             onPress={() => setDeleteSheetVisible(false)}
           />
-          <View style={[styles.deleteSheet, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+          <View style={[styles.deleteSheet, { backgroundColor: colors.background, borderColor: colors.border }]}>
             <View style={styles.deleteSheetHandle} />
             <AppText style={[styles.deleteSheetTitle, { color: colors.textPrimary }]}>
               ¿Qué datos quieres borrar?
@@ -651,7 +750,7 @@ export default function SettingsScreen() {
               <View style={styles.deleteOptionInfo}>
                 <AppText style={[styles.deleteOptionTitle, { color: colors.textPrimary }]}>Datos de estilos</AppText>
                 <AppText style={[styles.deleteOptionDesc, { color: colors.textSecondary }]}>
-                  Temas, fondos, colores, gráficas, movimientos, brillos y puntos de la tienda
+                  Temas, fondos, colores, gráficas, movimientos, brillos y koins de la tienda
                 </AppText>
               </View>
               <Ionicons name="chevron-forward" size={18} color={colors.textSecondary} />
@@ -728,7 +827,7 @@ export default function SettingsScreen() {
                   { icon: "stats-chart-outline" as const, label: "Paletas de gráficas", count: deleteCounts.graficas },
                   { icon: "move-outline" as const, label: "Movimientos visuales", count: deleteCounts.movimientos_visuales },
                   { icon: "sunny-outline" as const, label: "Brillos", count: deleteCounts.brillos },
-                  { icon: "star-outline" as const, label: "Puntos de la tienda (quedan en 0)", count: deleteCounts.puntos, noCount: true },
+                  { icon: "star-outline" as const, label: "Koins de la tienda (quedan en 0)", count: deleteCounts.puntos, noCount: true },
                   { icon: "bug-outline" as const, label: "Reportes visuales registrados", count: deleteCounts.reportes },
                 ].map((row) => (
                   <View key={row.label} style={[styles.deleteRow, { borderColor: colors.border }]}>
@@ -778,7 +877,7 @@ export default function SettingsScreen() {
                   { icon: "repeat-outline" as const, label: "Movimientos recurrentes", count: deleteCounts.recurrentes },
                   { icon: "notifications-outline" as const, label: "Notificaciones de la app", count: deleteCounts.notificaciones },
                   { icon: "link-outline" as const, label: "Vínculos de notas", count: deleteCounts.vinculos },
-                  { icon: "color-palette-outline" as const, label: "Estilos (temas, fondos, colores, brillos) y puntos", count: deleteCounts.estilos },
+                  { icon: "color-palette-outline" as const, label: "Estilos (temas, fondos, colores, brillos) y koins", count: deleteCounts.estilos },
                   { icon: "sync-outline" as const, label: "Sincronización (URL y clave API)", count: undefined, noCount: true },
                 ].map((row) => (
                   <View key={row.label} style={[styles.deleteRow, { borderColor: colors.border }]}>
@@ -813,21 +912,54 @@ export default function SettingsScreen() {
         visible={deleteConfirmVisible}
         animationType="fade"
         transparent
-        onRequestClose={() => setDeleteConfirmVisible(false)}
+        onRequestClose={deleting ? () => {} : () => setDeleteConfirmVisible(false)}
       >
         <View style={styles.ptsOverlay}>
-          <View style={[styles.ptsCard, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+          <View style={[styles.ptsCard, { backgroundColor: colors.background, borderColor: colors.border }]}>
             <View style={[styles.deleteConfirmIcon, { backgroundColor: colors.error + "14" }]}>
               <Ionicons name="trash-outline" size={28} color={colors.error} />
             </View>
             <AppText style={[styles.deleteConfirmTitle, { color: colors.textPrimary }]}>¿Confirmás el borrado?</AppText>
             <AppText style={[styles.deleteConfirmDesc, { color: colors.textSecondary }]}>
               {deleteFinalKind === "styles"
-                ? "Se eliminarán los temas, fondos, colores, gráficas, movimientos, brillos y puntos."
+                ? "Se eliminarán los temas, fondos, colores, gráficas, movimientos, brillos y koins."
                 : deleteFinalKind === "finance"
                   ? "Se eliminarán los movimientos, categorías y recurrentes."
                   : "Se eliminarán todos los datos de la app. Esta acción no se puede deshacer."}
             </AppText>
+
+            {/* Barra de progreso en vivo: cada paso libera la cola de la DB,
+                así la UI se actualiza y la app no parece congelada. */}
+            {deleting && deleteProgress && (
+              <View style={styles.deleteProgressWrap}>
+                <View style={styles.deleteProgressRow}>
+                  <AppText
+                    style={[styles.deleteProgressLabel, { color: colors.textSecondary }]}
+                    numberOfLines={1}
+                  >
+                    {deleteProgress.label}
+                  </AppText>
+                  <AppText style={[styles.deleteProgressPct, { color: colors.textSecondary }]}>
+                    {Math.round((deleteProgress.done / deleteProgress.total) * 100)}%
+                  </AppText>
+                </View>
+                <View style={[styles.deleteProgressTrack, { backgroundColor: colors.border }]}>
+                  <View
+                    style={[
+                      styles.deleteProgressFill,
+                      {
+                        backgroundColor: colors.primary,
+                        width: `${(deleteProgress.done / deleteProgress.total) * 100}%` as `${number}%`,
+                      },
+                    ]}
+                  />
+                </View>
+                <AppText style={[styles.deleteProgressCount, { color: colors.textSecondary }]}>
+                  Paso {deleteProgress.done} de {deleteProgress.total}
+                </AppText>
+              </View>
+            )}
+
             <View style={styles.deleteConfirmActions}>
               <TouchableOpacity style={[styles.deleteConfirmBtn, { borderColor: colors.border }]} activeOpacity={0.7} onPress={() => setDeleteConfirmVisible(false)} disabled={deleting}>
                 <AppText style={[styles.deleteConfirmBtnText, { color: colors.textPrimary }]}>Volver</AppText>
@@ -844,65 +976,126 @@ export default function SettingsScreen() {
         </View>
       </Modal>
 
-      {/* Modal: Código de desbloqueo (tocar "IntoCode" en el footer) */}
+      {/* Modal: Código de desbloqueo (tocar "IntoCode" en el footer). Un solo
+          Modal con dos pasos: "code" pide los 4 pares y "reward" muestra el
+          badge + botón "+2000". Cambiar de paso sin reabrir el Modal evita
+          que Android apile dos Dialogs (aparecía tarde y no recibía toques). */}
       <Modal
         visible={unlockVisible}
         animationType="fade"
         transparent
-        onRequestClose={() => setUnlockVisible(false)}
+        onRequestClose={closeUnlock}
       >
         <View style={styles.ptsOverlay}>
-          <View style={[styles.ptsCard, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+          <View style={[styles.ptsCard, { backgroundColor: colors.background, borderColor: colors.border }]}>
             <TouchableOpacity
-              onPress={() => {
-                setUnlockVisible(false);
-                setCodeParts(["", "", "", ""]);
-              }}
+              onPress={closeUnlock}
               style={styles.codeCloseBtn}
               hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
             >
               <Ionicons name="close" size={22} color={colors.textSecondary} />
             </TouchableOpacity>
 
-            <View style={styles.codeRow}>
-              {[0, 1, 2, 3].map((i) => (
-                <TextInput
-                  key={i}
-                  ref={(el) => {
-                    codeInputsRef.current[i] = el;
-                  }}
-                  style={[styles.codeInput, { color: colors.textPrimary, borderColor: colors.border, backgroundColor: colors.background }]}
-                  keyboardType="number-pad"
-                  maxLength={2}
-                  value={codeParts[i]}
-                  onChangeText={(t) => handleCodeChange(i, t)}
-                  onKeyPress={(e) => {
-                    if (e.nativeEvent.key === "Backspace" && codeParts[i] === "" && i > 0) {
-                      codeInputsRef.current[i - 1]?.focus();
-                    }
-                  }}
-                  selectTextOnFocus
-                />
-              ))}
-            </View>
+            {unlockStep === "code" ? (
+              <>
+                <View style={styles.codeRow}>
+                  {[0, 1, 2, 3].map((i) => (
+                    <TextInput
+                      key={i}
+                      ref={(el) => {
+                        codeInputsRef.current[i] = el;
+                      }}
+                      style={[styles.codeInput, { color: colors.textPrimary, borderColor: colors.border, backgroundColor: colors.background }]}
+                      keyboardType="number-pad"
+                      maxLength={2}
+                      value={codeParts[i]}
+                      onChangeText={(t) => handleCodeChange(i, t)}
+                      onKeyPress={(e) => {
+                        if (e.nativeEvent.key === "Backspace" && codeParts[i] === "" && i > 0) {
+                          codeInputsRef.current[i - 1]?.focus();
+                        }
+                      }}
+                      selectTextOnFocus
+                    />
+                  ))}
+                </View>
 
-            <View style={styles.feedbackActions}>
-              <TouchableOpacity
-                style={[styles.feedbackBtn, { backgroundColor: colors.background, borderColor: colors.border }]}
-                onPress={() => {
-                  setUnlockVisible(false);
-                  setCodeParts(["", "", "", ""]);
-                }}
-              >
-                <AppText style={[styles.feedbackBtnText, { color: colors.textPrimary }]}>Cancelar</AppText>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.feedbackBtn, styles.feedbackBtnPrimary, { backgroundColor: colors.primary }]}
-                onPress={handleUnlockSubmit}
-              >
-                <AppText style={[styles.feedbackBtnText, { color: "#fff" }]}>Aceptar</AppText>
-              </TouchableOpacity>
-            </View>
+                <View style={styles.feedbackActions}>
+                  <TouchableOpacity
+                    style={[styles.feedbackBtn, { backgroundColor: colors.background, borderColor: colors.border }]}
+                    onPress={closeUnlock}
+                  >
+                    <AppText style={[styles.feedbackBtnText, { color: colors.textPrimary }]}>Cancelar</AppText>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.feedbackBtn, styles.feedbackBtnPrimary, { backgroundColor: colors.primary }]}
+                    onPress={handleUnlockSubmit}
+                  >
+                    <AppText style={[styles.feedbackBtnText, { color: "#fff" }]}>Aceptar</AppText>
+                  </TouchableOpacity>
+                </View>
+              </>
+            ) : (
+              <>
+                {/* Badge con los koins a la izquierda; la X queda a la derecha */}
+                <View style={styles.rewardTopRow}>
+                  <View style={styles.rewardBadge}>
+                    <KoinIcon size={20} />
+                    <AppText style={styles.rewardBadgeText}>{rewardKoins >= 0 ? rewardKoins : "..."}</AppText>
+                  </View>
+                </View>
+
+                <AppText style={[styles.rewardText, { color: colors.textPrimary }]}>
+                  {collected
+                    ? "Listo mi vida,\n+2000 koins."
+                    : "Para mi niña hermosa,\n+2000 Koins solo para ti princesa"}
+                </AppText>
+
+                <TouchableOpacity
+                  style={[
+                    styles.rewardClaimBtn,
+                    { backgroundColor: collected ? colors.success : colors.primary },
+                  ]}
+                  onPress={collected ? closeUnlock : handleCollectKoins}
+                  activeOpacity={0.7}
+                  disabled={collecting}
+                >
+                  {collected ? (
+                    <Ionicons name="checkmark-circle" size={20} color="#fff" />
+                  ) : (
+                    <KoinIcon size={20} color="#fff" />
+                  )}
+                  <AppText style={[styles.rewardClaimText, { color: "#fff" }]}>
+                    {collected ? "Listo" : "+2000"}
+                  </AppText>
+                </TouchableOpacity>
+              </>
+            )}
+          </View>
+        </View>
+      </Modal>
+
+      {/* Modal: aviso de que el código ya fue canjeado (el toque al footer
+          solo muestra este aviso, sin volver a pedir el código). */}
+      <Modal
+        visible={alreadyVisible}
+        animationType="fade"
+        transparent
+        onRequestClose={() => setAlreadyVisible(false)}
+      >
+        <View style={styles.ptsOverlay}>
+          <View style={[styles.ptsCard, { backgroundColor: colors.background, borderColor: colors.border }]}>
+            <TouchableOpacity
+              onPress={() => setAlreadyVisible(false)}
+              style={styles.codeCloseBtn}
+              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+            >
+              <Ionicons name="close" size={22} color={colors.textSecondary} />
+            </TouchableOpacity>
+
+            <AppText style={[styles.rewardText, { color: colors.textPrimary }]}>
+              Uy amor quiere más puntos?{"\n"}Haga cosas mejor jsjsjs
+            </AppText>
           </View>
         </View>
       </Modal>

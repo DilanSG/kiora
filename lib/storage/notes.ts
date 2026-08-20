@@ -66,8 +66,6 @@ async function getLinksForNotes(noteIds: string[]): Promise<Map<string, NoteLink
   return map;
 }
 
-// Obtiene todas las notas ordenadas por fijadas primero y luego por fecha descendente.
-// Resuelve los links de todas las notas en una sola consulta para evitar N+1.
 export async function getNotes(): Promise<Note[]> {
   const db = getDb();
   const rows = await db.getAllAsync<NoteRow>(
@@ -78,8 +76,7 @@ export async function getNotes(): Promise<Note[]> {
   return rows.map((r) => mapNote(r, linksMap.get(r.id) || []));
 }
 
-// Filtra notas vinculadas a una entidad especifica (task, goal, goal_step)
-// mediante la tabla intermedia note_links. JOIN interno, no subconsulta.
+// Notas vinculadas a una entidad vía note_links; JOIN interno, no subconsulta.
 export async function getNotesForEntity(
   entityType: NoteEntityType,
   entityId: string
@@ -98,9 +95,8 @@ export async function getNotesForEntity(
   return rows.map((r) => mapNote(r, linksMap.get(r.id) || []));
 }
 
-// Busca notas por titulo o contenido usando LIKE. El LIKE con % al inicio
-// impide usar indices de SQLite, pero la tabla de notas es lo suficientemente
-// pequena como para que no sea un problema en la practica.
+// LIKE con % inicial no usa índices de SQLite, pero la tabla de notas es
+// pequeña: aceptable para la búsqueda.
 export async function searchNotes(query: string): Promise<Note[]> {
   const db = getDb();
   const like = `%${query}%`;

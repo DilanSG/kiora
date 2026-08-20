@@ -1,15 +1,10 @@
-// Modulo de sincronizacion de datos con n8n y configuracion de URL / API Key.
-
 import * as SecureStore from "expo-secure-store";
 import { getDb } from "./db";
 import { addTransaction } from "./finance";
 import { SYNC_KEY_SECURE } from "./helpers";
 
-// Valida si un hostname pertenece a red privada (RFC 1918) o localhost.
-// Esto permite que la app se conecte via HTTP a un bridge en la LAN sin
-// exponer la API key en texto plano a traves de internet. Las URLs http://
-// con hostnames publicos son rechazadas en normalizeSyncUrl.
-// Rangos privados: 10.x.x.x, 192.168.x.x, 172.16-31.x.x, 169.254.x.x
+// Permite http:// solo a redes privadas (RFC 1918) o localhost: la app puede
+// apuntar a un bridge en la LAN sin exponer la API key en texto plano por internet.
 function isPrivateHostname(hostname: string): boolean {
   if (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1") {
     return true;
@@ -32,7 +27,6 @@ function isPrivateHostname(hostname: string): boolean {
   return false;
 }
 
-// Normaliza y valida una URL de sincronizacion permitida. Param rawUrl: URL cruda. Retorna URL absoluta sin slash final.
 function normalizeSyncUrl(rawUrl: string): string {
   const trimmed = rawUrl.trim();
   if (!trimmed) throw new Error("La URL no puede estar vacía.");
@@ -53,7 +47,6 @@ function normalizeSyncUrl(rawUrl: string): string {
   return parsed.toString().replace(/\/$/, "");
 }
 
-// Lee la API key desde almacenamiento seguro del dispositivo. Retorna API key o cadena vacia si no existe.
 export async function getSecureSyncKey(): Promise<string> {
   try {
     return (await SecureStore.getItemAsync(SYNC_KEY_SECURE)) ?? "";
@@ -62,21 +55,18 @@ export async function getSecureSyncKey(): Promise<string> {
   }
 }
 
-// Guarda la API key en almacenamiento seguro. Retorna promesa resuelta cuando la clave queda guardada.
 export async function setSecureSyncKey(value: string): Promise<void> {
   await SecureStore.setItemAsync(SYNC_KEY_SECURE, value);
 }
 
-// Elimina la API key segura cuando se borra configuracion de sync. Retorna promesa resuelta tras la eliminacion.
 export async function deleteSecureSyncKey(): Promise<void> {
   try {
     await SecureStore.deleteItemAsync(SYNC_KEY_SECURE);
   } catch {
-    // ignora fallos
+    // eliminar una key inexistente no debe romper la limpieza de config
   }
 }
 
-// Obtiene configuracion de sincronizacion desde la tabla settings. Retorna URL y API key vigentes.
 export async function getSyncConfig(): Promise<{ url: string; key: string }> {
   const db = getDb();
   const row = await db.getFirstAsync<{ value: string }>(
@@ -86,8 +76,6 @@ export async function getSyncConfig(): Promise<{ url: string; key: string }> {
   return { url: row?.value ?? "", key };
 }
 
-// Guarda o elimina configuracion de sincronizacion con validaciones.
-// Param url: URL base. Param key: API key. Retorna promesa resuelta tras guardado o limpieza.
 export async function setSyncConfig(url: string, key: string): Promise<void> {
   const trimmedUrl = url.trim();
   const trimmedKey = key.trim();
@@ -113,10 +101,8 @@ export async function setSyncConfig(url: string, key: string): Promise<void> {
 const SYNCED_IDS_KEY = "synced_remote_ids";
 const MAX_SYNCED_IDS = 2000;
 
-// Carga los IDs remotos ya procesados desde settings.
-// Persistir los IDs en SQLite en vez de solo en memoria permite que
-// un crash a mitad del sync no reimporte items ya insertados localmente.
-// Se mantienen hasta MAX_SYNCED_IDS para evitar que la fila crezca sin limite.
+// IDs remotos ya procesados, persistidos en SQLite: un crash a mitad del sync
+// no reimporta lo ya insertado. Tope de MAX_SYNCED_IDS para que no crezca sin límite.
 async function getSyncedIds(): Promise<Set<string>> {
   const db = getDb();
   const row = await db.getFirstAsync<{ value: string }>(
@@ -131,7 +117,6 @@ async function getSyncedIds(): Promise<Set<string>> {
   }
 }
 
-// Agrega un ID remoto a la lista de procesados y la persiste.
 async function addSyncedId(id: string): Promise<void> {
   const db = getDb();
   const ids = await getSyncedIds();
@@ -163,12 +148,8 @@ async function fetchWithTimeout(url: string, options: RequestInit = {}, timeoutM
   }
 }
 
-// Sincroniza gastos pendientes desde n8n y los marca como procesados.
-// Cada item pendiente tiene un `id` unico (UUID v4) generado por el bridge.
-// Antes de insertar se verifica si ese `id` ya fue procesado; si es asi,
-// se saltea la insercion y solo se elimina del bridge. Esto evita
-// duplicados si la app se cierra entre addTransaction y el DELETE.
-// Retorna cantidad de registros importados.
+// Cada item pendiente trae un `id` UUID v4 del bridge: sirve de dedup para
+// que un crash entre addTransaction y el DELETE no duplique el gasto.
 export async function syncFromN8n(): Promise<number> {
   const { url, key } = await getSyncConfig();
   if (!url || !key) throw new Error("Configura la URL y la API key primero.");
@@ -192,8 +173,6 @@ export async function syncFromN8n(): Promise<number> {
   let imported = 0;
 
   for (const item of pending) {
-    // Si el ID remoto ya se proceso antes (por un crash entre INSERT y DELETE
-    // en una sync anterior), se saltea la insercion local.
     if (!synced.has(item.id)) {
       await addTransaction({
         amount: item.amount,
@@ -204,12 +183,10 @@ export async function syncFromN8n(): Promise<number> {
       synced.add(item.id);
       imported += 1;
     }
-    // DELETE individual por item; si falla, se logea pero no se detiene el sync
-    // para evitar que un error de red a mitad de camino bloquee el resto.
+    // DELETE individual: si falla se ignora para que un error de red no bloquee el resto.
     try {
       await fetchWithTimeout(`${base}/api/expense/${item.id}`, { method: "DELETE", headers });
     } catch {
-      // ignora errores de DELETE individual — el bridge reenviara items no eliminados
     }
   }
 

@@ -1,4 +1,3 @@
-// Modulo de almacenamiento de base de datos para Notificaciones locales in-app.
 import { AppNotification, NotificationType } from "./types";
 
 import { getDb } from "./db";
@@ -12,7 +11,6 @@ type NotificationRow = {
   created_at: string;
 };
 
-// Obtiene todas las notificaciones de la base de datos local. Retorna lista ordenada por creacion descendente.
 export async function getNotifications(): Promise<AppNotification[]> {
   const db = getDb();
   const rows = await db.getAllAsync<NotificationRow>(
@@ -27,9 +25,8 @@ export async function getNotifications(): Promise<AppNotification[]> {
   }));
 }
 
-// Anade una nueva notificacion al sistema. Param message: Mensaje del banner. Param type: Severidad/estilo.
-// Efecto secundario: purga notificaciones anteriores a PURGE_DAYS dias
-// para evitar que la tabla crezca sin limite (ver README §5.6).
+// Efecto secundario: purga las notificaciones > PURGE_DAYS días al insertar,
+// para que la tabla no crezca sin límite.
 export async function addNotification(
   message: string,
   type: NotificationType = "info"
@@ -42,8 +39,6 @@ export async function addNotification(
   await deleteOldNotifications(PURGE_DAYS);
 }
 
-// Borra notificaciones anteriores a N dias. Se llama desde addNotification
-// para mantener acotado el tamaño de la tabla. Param days: Antiguedad en dias.
 export async function deleteOldNotifications(days: number): Promise<void> {
   const db = getDb();
   const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
@@ -52,7 +47,6 @@ export async function deleteOldNotifications(days: number): Promise<void> {
 
 const PURGE_DAYS = 30;
 
-// Marca una notificacion como leida o procesada. Param id: ID de la notificacion.
 export async function markNotificationAsRead(id: string): Promise<void> {
   const db = getDb();
   await db.runAsync(
@@ -61,7 +55,6 @@ export async function markNotificationAsRead(id: string): Promise<void> {
   );
 }
 
-// Limpia todas las notificaciones leidas.
 export async function clearReadNotifications(): Promise<void> {
   const db = getDb();
   await db.runAsync("DELETE FROM app_notifications WHERE read = 1");

@@ -3,8 +3,6 @@ import { getDb } from "./db";
 const ACTIVE_KEY = "active_glow_id";
 const INTENSITY_KEY = "glow_intensity";
 
-// Lee el ID del efecto de brillo activo desde settings. Retorna "none"
-// como default si no hay configuracion previa o la clave no existe.
 export async function getActiveGlowId(): Promise<string> {
   const db = getDb();
   const row = await db.getFirstAsync<{ value: string }>(
@@ -14,8 +12,6 @@ export async function getActiveGlowId(): Promise<string> {
   return row?.value ?? "none";
 }
 
-// Persiste el ID del efecto de brillo activo. Sobrescribe el valor
-// anterior con INSERT OR REPLACE.
 export async function setActiveGlowId(id: string): Promise<void> {
   const db = getDb();
   await db.runAsync(
@@ -25,9 +21,7 @@ export async function setActiveGlowId(id: string): Promise<void> {
   );
 }
 
-// Lee la intensidad del brillo (0-100) desde settings. Si el valor
-// almacenado no es un numero valido, retorna 50 como default seguro.
-// Clamping en [0, 100] por si hay datos corruptos.
+// Clamping y default 50 por si hay datos corruptos o valores fuera de rango.
 export async function getGlowIntensity(): Promise<number> {
   const db = getDb();
   const row = await db.getFirstAsync<{ value: string }>(
@@ -38,9 +32,7 @@ export async function getGlowIntensity(): Promise<number> {
   return Number.isFinite(val) ? Math.max(0, Math.min(100, val)) : 50;
 }
 
-// Persiste la intensidad del brillo. Clampa a [0, 100] y redondea para
-// evitar valores invalidos, incluso si el caller pasa un numero fuera
-// de rango o con decimales.
+// Clampa y redondea: el caller puede pasar valores fuera de rango o con decimales.
 export async function setGlowIntensity(value: number): Promise<void> {
   const db = getDb();
   const clamped = Math.max(0, Math.min(100, Math.round(value)));
@@ -51,9 +43,6 @@ export async function setGlowIntensity(value: number): Promise<void> {
   );
 }
 
-// Obtiene el Set de IDs de efectos de brillo comprados. Siempre incluye
-// "none" como item gratuito base. Retorna solo {"none"} si no hay
-// registros o el JSON esta corrupto.
 export async function getPurchasedGlowIds(): Promise<Set<string>> {
   const db = getDb();
   const rows = await db.getAllAsync<{ value: string }>(
@@ -68,8 +57,7 @@ export async function getPurchasedGlowIds(): Promise<Set<string>> {
   }
 }
 
-// Compra un efecto de brillo: verifica puntos, deduce el costo y agrega
-// el ID a la lista de comprados, todo en una transaccion exclusiva.
+// Transacción exclusiva: un crash entre deducción y registro no pierde puntos.
 export async function purchaseGlow(
   id: string,
   cost: number

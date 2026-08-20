@@ -2,8 +2,6 @@ import { getDb } from "./db";
 
 const ACTIVE_KEY = "active_movement_layer";
 
-// Lee la capa de movimiento activa desde settings. Retorna "none" como
-// default si no hay configuracion previa o la clave no existe.
 export async function getActiveMovementLayer(): Promise<string> {
   const db = getDb();
   const row = await db.getFirstAsync<{ value: string }>(
@@ -13,8 +11,6 @@ export async function getActiveMovementLayer(): Promise<string> {
   return row?.value ?? "none";
 }
 
-// Persiste el ID de la capa de movimiento activa. Sobrescribe el valor
-// anterior con INSERT OR REPLACE.
 export async function setActiveMovementLayer(id: string): Promise<void> {
   const db = getDb();
   await db.runAsync(
@@ -24,8 +20,6 @@ export async function setActiveMovementLayer(id: string): Promise<void> {
   );
 }
 
-// Obtiene el Set de IDs de capas de movimiento compradas. Siempre incluye
-// "none" como item gratuito base. Retorna solo {"none"} si no hay datos.
 export async function getPurchasedMovementLayerIds(): Promise<Set<string>> {
   const db = getDb();
   const rows = await db.getAllAsync<{ value: string }>(
@@ -40,8 +34,7 @@ export async function getPurchasedMovementLayerIds(): Promise<Set<string>> {
   }
 }
 
-// Compra una capa de movimiento: verifica puntos, deduce el costo y agrega
-// el ID a la lista de comprados, todo en una transaccion exclusiva.
+// Transacción exclusiva: un crash entre deducción y registro no pierde puntos.
 export async function purchaseMovementLayer(
   id: string,
   cost: number

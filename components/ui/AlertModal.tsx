@@ -157,7 +157,7 @@ const getStyles = (colors: ThemeColors) =>
     card: {
       width: "100%",
       maxWidth: 360,
-      backgroundColor: colors.surface,
+      backgroundColor: colors.background,
       borderRadius: 20,
       borderWidth: 1,
       borderColor: colors.border,

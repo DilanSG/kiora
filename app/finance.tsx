@@ -18,9 +18,10 @@ import { Ionicons } from "@expo/vector-icons";
 import { useTheme, ThemeColors, useGlow } from "../lib/theme";
 import { useTransactions } from "../hooks/useTransactions";
 import { Transaction, PeriodPoint, RecurringExpense, RecurringInterval } from "../lib/storage/types";
-import { addTransactionsBatch, getMonthlyStats, getWeeklyBreakdownForMonth, getWeeklyStatsForWeek, getDailyBreakdownForWeekDate, getYearlyStats, getMonthlyBreakdownForYear, syncFromN8n, computeNextRecurrence } from "../lib/storage";
-import { requestSmsPermission, readSmsInbox, classifySmsMessages, ParsedMovement, SmsPermissionResult, openAppSettings } from "../lib/native/SmsReader";
+import { addTransactionsBatch, getMonthlyStats, getDailyBreakdownForMonth, getWeeklyStatsForWeek, getDailyBreakdownForWeekDate, getYearlyStats, getMonthlyBreakdownForYear, syncFromN8n, computeNextRecurrence } from "../lib/storage";
+import { requestSmsPermission, readSmsInbox, classifySmsMessages, ParsedMovement, SmsPermissionResult, openRestrictedSettings } from "../lib/native/SmsReader";
 import { TransactionCard } from "../components/features/finance/TransactionCard";
+import TransactionDetailModal from "../components/features/finance/TransactionDetailModal";
 import BackgroundDecor from "../components/ui/BackgroundDecor";
 import EmptyState from "../components/ui/EmptyState";
 import AppText from "../components/ui/AppText";
@@ -28,18 +29,21 @@ import { useAlert } from "../components/ui/AlertModal";
 import GlowView from "../components/ui/GlowView";
 import { formatCurrency } from "../lib/currency";
 import { CalendarPicker, MONTHS_ES } from "../components/ui/CalendarPicker";
+import { useSafeBottom } from "../hooks/useSafeBottom";
 
 // ─── Gráfico de líneas ─────────────────────────────────────────────────────
 
 const CHART_H = 100;
 const DOT_R = 3;
 const Y_AXIS_W = 44;
+const CHART_PAD = 10;
+// El mes muestra un día por fila, así que sus etiquetas numéricas van más pequeñas.
+const MONTH_LABEL_SIZE = 8;
 const PERIODS = ["Semana", "Mes", "Año"] as const;
 
 const DAYS_ES = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"];
 const MONTHS_ES_SHORT = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"];
 
-// Formatea un valor numérico como etiqueta compacta para el eje Y.
 function formatYVal(val: number): string {
   if (val >= 1_000_000) return `${(val / 1_000_000).toFixed(1)}M`;
   if (val >= 10_000) return `${Math.round(val / 1_000)}k`;
@@ -47,33 +51,34 @@ function formatYVal(val: number): string {
   return String(Math.round(val));
 }
 
-// Eje Y con tres etiquetas (máximo, mitad y cero) alineadas verticalmente al área del gráfico.
-function YAxis({ maxVal }: { maxVal: number }) {
+// Eje Y alineado al área del gráfico: muestra el máximo real, la mitad y cero,
+// cada uno en su posición real dentro de la escala (con el sobre de 20k).
+function YAxis({ maxVal, scaleMax }: { maxVal: number; scaleMax: number }) {
   const colors = useTheme();
   const lblStyle = { fontSize: 8, color: colors.textSecondary };
+
+  // Posición Y dentro del área según escala real (igual fórmula que el gráfico).
+  function yPos(val: number): number {
+    return CHART_H - (val / scaleMax) * CHART_H;
+  }
+
+  const ticks = [
+    { val: maxVal, label: formatYVal(maxVal) },
+    { val: maxVal / 2, label: formatYVal(maxVal / 2) },
+    { val: 0, label: "0" },
+  ];
   return (
     <View style={{ width: Y_AXIS_W, height: CHART_H }}>
-      <AppText
-        numberOfLines={1}
-        disableHorizontalPadding
-        style={[lblStyle, { position: "absolute", top: 0, right: 4 }]}
-      >
-        {formatYVal(maxVal)}
-      </AppText>
-      <AppText
-        numberOfLines={1}
-        disableHorizontalPadding
-        style={[lblStyle, { position: "absolute", top: CHART_H / 2 - 5, right: 4 }]}
-      >
-        {formatYVal(maxVal / 2)}
-      </AppText>
-      <AppText
-        numberOfLines={1}
-        disableHorizontalPadding
-        style={[lblStyle, { position: "absolute", bottom: 0, right: 4 }]}
-      >
-        0
-      </AppText>
+      {ticks.map((t, i) => (
+        <AppText
+          key={i}
+          numberOfLines={1}
+          disableHorizontalPadding
+          style={[lblStyle, { position: "absolute", top: yPos(t.val) - 5, right: 4 }]}
+        >
+          {t.label}
+        </AppText>
+      ))}
     </View>
   );
 }
@@ -104,10 +109,11 @@ function lineSegmentStyle(
   };
 }
 
-// Gráfico de líneas comparativo (ingresos vs gastos) con puntos centrados en cada celda de etiqueta.
-// El ahorro se dibuja como línea fina de 1px sobre la de ingresos; los gastos
-// recurrentes ya forman parte del total de gastos y no tienen serie propia.
-function FinanceLineChart({ data, maxVal, showSavings = false }: { data: PeriodPoint[]; maxVal: number; showSavings?: boolean }) {
+// Gráfico de líneas comparativo (ingresos vs gastos). El ahorro va como línea
+// fina de 1px sobre los ingresos; los recurrentes ya suman al total de gastos.
+// maxVal añade 25% de tolerancia a la escala y el grid del eje Y usa los
+// valores reales (máximo, mitad, cero), así el pico nunca se sale del área.
+function FinanceLineChart({ data, maxVal, topLabel, showSavings = false, labels = [], labelSize = 9 }: { data: PeriodPoint[]; maxVal: number; topLabel: number; showSavings?: boolean; labels?: string[]; labelSize?: number }) {
   const colors = useTheme();
   const [cw, setCw] = useState(0);
   const n = data.length;
@@ -120,35 +126,59 @@ function FinanceLineChart({ data, maxVal, showSavings = false }: { data: PeriodP
     return CHART_H - (val / maxVal) * CHART_H;
   }
 
+  // Líneas horizontales alineadas con los valores del eje Y.
+  const gridVals = [topLabel, topLabel / 2, 0];
+
   return (
-    <View
-      style={{ height: CHART_H, position: "relative" }}
-      onLayout={(e: LayoutChangeEvent) => setCw(e.nativeEvent.layout.width)}
-    >
-      {cw > 0 && (
-        <>
-          {data.slice(0, -1).map((_, i) => (
-            <View key={`il${i}`} style={lineSegmentStyle(getX(i), getY(data[i].income), getX(i + 1), getY(data[i + 1].income), colors.chartPositive || colors.success)} />
+    <View style={{ paddingHorizontal: CHART_PAD }}>
+      <View
+        style={{ height: CHART_H, position: "relative" }}
+        onLayout={(e: LayoutChangeEvent) => setCw(e.nativeEvent.layout.width)}
+      >
+        {cw > 0 && (
+          <>
+            {gridVals.map((v) => (
+              <View
+                key={`grid${v}`}
+                style={{ position: "absolute", left: 0, right: 0, top: getY(v) - 0.5, height: 1, backgroundColor: colors.border, opacity: v === 0 ? 0.45 : 0.35 }}
+              />
+            ))}
+            <View
+              style={{ position: "absolute", left: 0, top: 0, width: 2, height: CHART_H, backgroundColor: colors.border, opacity: 0.9 }}
+            />
+            {data.slice(0, -1).map((_, i) => (
+              <View key={`il${i}`} style={lineSegmentStyle(getX(i), getY(data[i].income), getX(i + 1), getY(data[i + 1].income), colors.chartPositive || colors.success)} />
+            ))}
+            {data.slice(0, -1).map((_, i) => (
+              <View key={`el${i}`} style={lineSegmentStyle(getX(i), getY(data[i].expenses), getX(i + 1), getY(data[i + 1].expenses), colors.chartNegative || colors.error)} />
+            ))}
+            {showSavings && data.slice(0, -1).map((_, i) => (
+              <View key={`sl${i}`} style={lineSegmentStyle(getX(i), getY(data[i].savings ?? 0), getX(i + 1), getY(data[i + 1].savings ?? 0), colors.chartPositive || colors.success, 1)} />
+            ))}
+            {data.map((p, i) => (
+              <View key={`id${i}`} style={{ position: "absolute", width: DOT_R * 2, height: DOT_R * 2, borderRadius: DOT_R, backgroundColor: colors.chartPositive || colors.success, left: getX(i) - DOT_R, top: getY(p.income) - DOT_R }} />
+            ))}
+            {data.map((p, i) => (
+              <View key={`ed${i}`} style={{ position: "absolute", width: DOT_R * 2, height: DOT_R * 2, borderRadius: DOT_R, backgroundColor: colors.chartNegative || colors.error, left: getX(i) - DOT_R, top: getY(p.expenses) - DOT_R }} />
+            ))}
+            {showSavings && data.map((p, i) =>
+              (p.savings ?? 0) > 0 ? (
+                <View key={`sd${i}`} style={{ position: "absolute", width: DOT_R * 2 - 2, height: DOT_R * 2 - 2, borderRadius: DOT_R - 1, backgroundColor: colors.chartPositive || colors.success, left: getX(i) - DOT_R + 1, top: getY(p.savings ?? 0) - DOT_R + 1 }} />
+              ) : null
+            )}
+          </>
+        )}
+      </View>
+      {cw > 0 && labels.length === n && (
+        <View style={{ height: 18, marginTop: 4, position: "relative" }}>
+          {labels.map((label, j) => (
+            <View key={j} style={{ position: "absolute", left: (j / n) * cw, width: cw / n, alignItems: "center" }}>
+              <AppText style={{ fontSize: labelSize, color: colors.textSecondary }} numberOfLines={1} disableHorizontalPadding>
+                {label}
+              </AppText>
+            </View>
           ))}
-          {data.slice(0, -1).map((_, i) => (
-            <View key={`el${i}`} style={lineSegmentStyle(getX(i), getY(data[i].expenses), getX(i + 1), getY(data[i + 1].expenses), colors.chartNegative || colors.error)} />
-          ))}
-          {showSavings && data.slice(0, -1).map((_, i) => (
-            <View key={`sl${i}`} style={lineSegmentStyle(getX(i), getY(data[i].savings ?? 0), getX(i + 1), getY(data[i + 1].savings ?? 0), colors.chartPositive || colors.success, 1)} />
-          ))}
-          {data.map((p, i) => (
-            <View key={`id${i}`} style={{ position: "absolute", width: DOT_R * 2, height: DOT_R * 2, borderRadius: DOT_R, backgroundColor: colors.chartPositive || colors.success, left: getX(i) - DOT_R, top: getY(p.income) - DOT_R }} />
-          ))}
-          {data.map((p, i) => (
-            <View key={`ed${i}`} style={{ position: "absolute", width: DOT_R * 2, height: DOT_R * 2, borderRadius: DOT_R, backgroundColor: colors.chartNegative || colors.error, left: getX(i) - DOT_R, top: getY(p.expenses) - DOT_R }} />
-          ))}
-          {/* Marcas de fechas de ahorro, punto más pequeño */}
-          {showSavings && data.map((p, i) =>
-            (p.savings ?? 0) > 0 ? (
-              <View key={`sd${i}`} style={{ position: "absolute", width: DOT_R * 2 - 2, height: DOT_R * 2 - 2, borderRadius: DOT_R - 1, backgroundColor: colors.chartPositive || colors.success, left: getX(i) - DOT_R + 1, top: getY(p.savings ?? 0) - DOT_R + 1 }} />
-            ) : null
-          )}
-        </>
+        </View>
       )}
     </View>
   );
@@ -178,7 +208,6 @@ function getCurrentWeekMonday(): Date {
   return monday;
 }
 
-// Formatea el rango de fechas de una semana dado su lunes, ej. "26 may – 1 jun 2026".
 function formatWeekRange(monday: Date): string {
   const sunday = new Date(monday);
   sunday.setDate(monday.getDate() + 6);
@@ -275,7 +304,8 @@ function RecurringSchedule({ day, onDay, startMonth, onStartMonth, styles, color
 // Pantalla de Finanzas: gráfico deslizable por periodo, stats por periodo, listado de movimientos editables.
 export default function FinanceScreen() {
   const colors = useTheme();
-  const styles = getStyles(colors);
+  const bottomPad = useSafeBottom();
+  const styles = getStyles(colors, bottomPad);
   const { glowStyle } = useGlow();
   const { width } = useWindowDimensions();
   const cardWidth = width - 32;
@@ -308,6 +338,7 @@ export default function FinanceScreen() {
   // ─── Period pager ────────────────────────────────────────────────────────
   const scrollRef = useRef<ScrollView>(null);
   const [activePeriod, setActivePeriod] = useState(0);
+  const [allTxVisible, setAllTxVisible] = useState(false);
 
   // ─── Navegación de semana ────────────────────────────────────────────────
   const [navWeekMonday, setNavWeekMonday] = useState(() => getCurrentWeekMonday());
@@ -332,7 +363,6 @@ export default function FinanceScreen() {
     return () => { cancelled = true; };
   }, [navWeekMonday, transactions]);
 
-  // Retrocede una semana en la navegación.
   function prevWeek() {
     setNavWeekMonday((m) => {
       const prev = new Date(m);
@@ -356,7 +386,7 @@ export default function FinanceScreen() {
   const [navYear, setNavYear] = useState(new Date().getFullYear());
   const [navMonthStats, setNavMonthStats] = useState({ income: 0, expenses: 0, balance: 0 });
   const [navMonthBreakdown, setNavMonthBreakdown] = useState<PeriodPoint[]>(
-    Array.from({ length: 4 }, () => ({ income: 0, expenses: 0 }))
+    Array.from({ length: new Date(new Date().getFullYear(), new Date().getMonth() + 1, 0).getDate() }, () => ({ income: 0, expenses: 0 }))
   );
 
   useEffect(() => {
@@ -364,7 +394,7 @@ export default function FinanceScreen() {
     async function load() {
       const [ms, mb] = await Promise.all([
         getMonthlyStats(navYear, navMonth),
-        getWeeklyBreakdownForMonth(navYear, navMonth),
+        getDailyBreakdownForMonth(navYear, navMonth),
       ]);
       if (!cancelled) {
         setNavMonthStats(ms);
@@ -375,7 +405,6 @@ export default function FinanceScreen() {
     return () => { cancelled = true; };
   }, [navYear, navMonth, transactions]);
 
-  // Retrocede un mes en la navegación del gráfico mensual.
   function prevMonth() {
     if (navMonth === 0) {
       setNavMonth(11);
@@ -420,7 +449,6 @@ export default function FinanceScreen() {
     return () => { cancelled = true; };
   }, [navYearNum, transactions]);
 
-  // Retrocede un año en la navegación.
   function prevYear() {
     setNavYearNum((y) => y - 1);
   }
@@ -434,7 +462,6 @@ export default function FinanceScreen() {
   const statsByPeriod = [navWeekStats, navMonthStats, navYearStats];
   const breakdownByPeriod = [navWeekBreakdown, navMonthBreakdown, navYearBreakdown];
 
-  // Desplaza el pager al periodo seleccionado (0=Semana, 1=Mes, 2=Año).
   function scrollToPeriod(i: number) {
     scrollRef.current?.scrollTo({ x: i * cardWidth, animated: true });
     setActivePeriod(i);
@@ -449,6 +476,7 @@ export default function FinanceScreen() {
   // ─── Modal de movimiento ─────────────────────────────────────────────────
   const [modalVisible, setModalVisible] = useState(false);
   const [editingTx, setEditingTx] = useState<Transaction | null>(null);
+  const [viewingTx, setViewingTx] = useState<Transaction | null>(null);
   // Identifica qué cuadrito del grid está activo: gasto, ingreso o sus
   // variantes recurrentes. De él se derivan isExpense e isRecurring.
   const [formKind, setFormKind] = useState<MovementFormKind>("expense");
@@ -475,12 +503,16 @@ export default function FinanceScreen() {
   const [smsSearching, setSmsSearching] = useState(false);
   const [smsList, setSmsList] = useState<ParsedMovement[]>([]);
   const [selectedSms, setSelectedSms] = useState<Set<string>>(new Set());
-  // Filtro de tipo sobre la lista de movimientos detectados por SMS.
   const [smsFilter, setSmsFilter] = useState<"all" | "expense" | "income">("all");
+  // Periodo de importación: solo se listan y registran movimientos dentro de
+  // este rango. null en "desde" significa sin límite hacia el pasado.
+  const [smsPeriodStart, setSmsPeriodStart] = useState<Date | null>(null);
+  const [smsPeriodEnd, setSmsPeriodEnd] = useState<Date | null>(null);
+  const [showSmsPeriodPicker, setShowSmsPeriodPicker] = useState(false);
+  const [smsQuery, setSmsQuery] = useState("");
 
   // ─── Modal de movimiento recurrente (edición desde la lista) ──────────────
   const [recurModalVisible, setRecurModalVisible] = useState(false);
-  // Lista de recurrentes abierta desde el icono repeat del encabezado.
   const [recurListVisible, setRecurListVisible] = useState(false);
   const [editingRecur, setEditingRecur] = useState<RecurringExpense | null>(null);
   const [recType, setRecType] = useState<"expense" | "income">("expense");
@@ -514,16 +546,33 @@ export default function FinanceScreen() {
     setEditingTx(null);
   }
 
-  // Abre el modal vacío para crear un nuevo movimiento.
   function openAdd() {
     resetForm();
     setModalVisible(true);
   }
 
-  // Abre el modal precargado con los datos de un movimiento existente para editarlo.
+  function openDetail(tx: Transaction) {
+    setViewingTx(tx);
+  }
+
+  const viewingTxRecurring = viewingTx?.recurringId
+    ? recurringExpenses.find((r) => r.id === viewingTx.recurringId)
+    : undefined;
+
   function openEdit(tx: Transaction) {
+    setViewingTx(null);
     setEditingTx(tx);
-    setFormKind(tx.type === "expense" ? "expense" : "income");
+    // El tipo queda fijado según el origen del movimiento: un recurrente solo
+    // se edita como recurrente y un puntual solo como puntual.
+    setFormKind(
+      tx.recurringId
+        ? tx.type === "expense"
+          ? "recurring_expense"
+          : "recurring_income"
+        : tx.type === "expense"
+          ? "expense"
+          : "income"
+    );
     setAmount(String(tx.amount));
     setTitle(tx.description);
     setCategory(tx.category);
@@ -539,7 +588,6 @@ export default function FinanceScreen() {
     resetForm();
   }
 
-  // Guarda el movimiento: actualiza si hay edición en curso, crea uno nuevo si no.
   async function handleSave() {
     const value = parseFloat(amount);
     if (isNaN(value) || value <= 0) {
@@ -594,7 +642,6 @@ export default function FinanceScreen() {
     closeModal();
   }
 
-  // Muestra confirmación y elimina el movimiento en edición.
   function handleDelete(id: string) {
     showAlert("Eliminar movimiento", "¿Deseas borrar esta transacción?", [
       { text: "Cancelar", style: "cancel" },
@@ -604,12 +651,12 @@ export default function FinanceScreen() {
         onPress: () => {
           deleteTransaction(id);
           closeModal();
+          setViewingTx(null);
         },
       },
     ]);
   }
 
-  // Agrega una nueva categoría al tipo activo y la selecciona en el formulario.
   async function handleAddCategory() {
     const term = newCatName.trim();
     if (!term) return;
@@ -639,7 +686,6 @@ export default function FinanceScreen() {
     setNewCatName("");
   }
 
-  // Abre el modal del movimiento recurrente precargado con los datos de una plantilla para editarla.
   function openRecurEdit(item: RecurringExpense) {
     setEditingRecur(item);
     setRecType(item.type === "income" ? "income" : "expense");
@@ -660,7 +706,6 @@ export default function FinanceScreen() {
     resetRecurForm();
   }
 
-  // Guarda el movimiento recurrente: actualiza si hay edición, crea uno nuevo si no.
   async function handleSaveRecurring() {
     const value = parseFloat(recAmount);
     if (isNaN(value) || value <= 0) {
@@ -719,7 +764,6 @@ export default function FinanceScreen() {
     );
   }
 
-  // Agrega una categoría del tipo activo para el formulario recurrente.
   async function handleAddRecurCategory() {
     const term = newCatName.trim();
     if (!term) return;
@@ -729,7 +773,6 @@ export default function FinanceScreen() {
     setShowCategoryAdd(false);
   }
 
-  // Próxima fecha de cobro de un gasto recurrente para la vista previa.
   function nextPreviewDate(item: RecurringExpense): Date {
     return computeNextRecurrence(item.anchorDate, item.interval);
   }
@@ -811,9 +854,12 @@ export default function FinanceScreen() {
     }
   }
 
-  // Registra como movimientos (gasto o ingreso) los elementos seleccionados.
+  // Registra como movimientos (gasto o ingreso) los elementos seleccionados
+  // que caen dentro del periodo de importación elegido.
   async function handleSmsAddSelected() {
-    const toAdd = smsList.filter((e) => selectedSms.has(e.id));
+    const toAdd = smsList.filter((e) =>
+      selectedSms.has(e.id) && smsInPeriod(e)
+    );
     await addTransactionsBatch(
       toAdd.map((m) => ({
         type: m.type,
@@ -835,7 +881,6 @@ export default function FinanceScreen() {
     reload();
   }
 
-  // Alterna la selección de un gasto SMS detectado.
   function toggleSmsItem(id: string) {
     setSelectedSms((prev) => {
       const next = new Set(prev);
@@ -846,16 +891,53 @@ export default function FinanceScreen() {
   }
 
   // Conteos por tipo y lista visible segun el filtro activo en el import SMS.
-  const smsCounts = useMemo(
-    () => ({
-      expense: smsList.filter((m) => m.type === "expense").length,
-      income: smsList.filter((m) => m.type === "income").length,
-    }),
-    [smsList]
-  );
-  const visibleSms = smsList.filter((m) => smsFilter === "all" || m.type === smsFilter);
+  // El periodo y la búsqueda filtran antes que el tipo: los chips cuentan
+  // movimientos del rango elegido, no del inbox completo.
+  function smsInPeriod(m: ParsedMovement): boolean {
+    return (
+      (!smsPeriodStart || m.date.getTime() >= smsPeriodStart.getTime()) &&
+      (!smsPeriodEnd || m.date.getTime() <= smsPeriodEnd.getTime())
+    );
+  }
 
-  // Cierra el modal de importación y resetea su estado.
+  function matchesSmsQuery(m: ParsedMovement): boolean {
+    const q = smsQuery.trim().toLowerCase();
+    if (!q) return true;
+    return (
+      m.description.toLowerCase().includes(q) ||
+      m.rawBody.toLowerCase().includes(q) ||
+      m.sender.toLowerCase().includes(q) ||
+      formatCurrency(m.amount).includes(q)
+    );
+  }
+
+  const smsCounts = useMemo(() => {
+    const period = smsList.filter(smsInPeriod);
+    return {
+      expense: period.filter((m) => m.type === "expense").length,
+      income: period.filter((m) => m.type === "income").length,
+    };
+  }, [smsList, smsPeriodStart, smsPeriodEnd]);
+  const visibleSms = smsList.filter(
+    (m) =>
+      (smsFilter === "all" || m.type === smsFilter) &&
+      smsInPeriod(m) &&
+      matchesSmsQuery(m)
+  );
+
+  // Al cambiar el periodo, la seleccion previa puede quedar fuera del rango:
+  // se poda para que el boton "Agregar N" coincida con lo que se registrara.
+  useEffect(() => {
+    setSelectedSms((prev) => {
+      const keep = new Set<string>();
+      for (const id of prev) {
+        const m = smsList.find((e) => e.id === id);
+        if (m && smsInPeriod(m)) keep.add(id);
+      }
+      return keep.size === prev.size ? prev : keep;
+    });
+  }, [smsPeriodStart, smsPeriodEnd, smsList]);
+
   function closeImportModal() {
     setImportModalVisible(false);
     setShowSmsImport(false);
@@ -867,6 +949,10 @@ export default function FinanceScreen() {
     setSmsList([]);
     setSelectedSms(new Set());
     setSmsFilter("all");
+    setSmsQuery("");
+    setShowSmsPeriodPicker(false);
+    setSmsPeriodStart(null);
+    setSmsPeriodEnd(null);
   }
 
   return (
@@ -892,6 +978,83 @@ export default function FinanceScreen() {
           </View>
 
           <ScrollView contentContainerStyle={styles.smsScroll} keyboardShouldPersistTaps="handled">
+            <View style={styles.smsPeriodBlock}>
+              <AppText style={styles.smsPeriodLabel}>Periodo de importación</AppText>
+              <View style={styles.smsFilterRow}>
+                {([
+                  [7, "7 días"],
+                  [30, "1 mes"],
+                  [90, "3 meses"],
+                  [365, "1 año"],
+                  [0, "Todo"],
+                ] as const).map(([days, label]) => {
+                  const active =
+                    (days === 0 && !smsPeriodStart) ||
+                    (days > 0 &&
+                      smsPeriodStart?.getTime() ===
+                        new Date(
+                          new Date().getFullYear(),
+                          new Date().getMonth(),
+                          new Date().getDate() - days,
+                          0, 0, 0
+                        ).getTime());
+                  return (
+                    <TouchableOpacity
+                      key={label}
+                      style={[styles.smsFilterChip, active && styles.smsFilterChipActive]}
+                      onPress={() => {
+                        if (days === 0) {
+                          setSmsPeriodStart(null);
+                          setSmsPeriodEnd(null);
+                        } else {
+                          setSmsPeriodStart(
+                            new Date(new Date().getFullYear(), new Date().getMonth(), new Date().getDate() - days, 0, 0, 0)
+                          );
+                          setSmsPeriodEnd(new Date());
+                        }
+                        setShowSmsPeriodPicker(false);
+                      }}
+                      activeOpacity={0.7}
+                    >
+                      <AppText style={[styles.smsFilterText, active && styles.smsFilterTextActive]}>
+                        {label}
+                      </AppText>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+              <View style={styles.smsPeriodRow}>
+                <AppText style={styles.smsPeriodRange}>
+                  {smsPeriodStart
+                    ? smsPeriodStart.toLocaleDateString("es", { day: "2-digit", month: "short", year: "numeric" })
+                    : "Desde siempre"}
+                  {" → "}
+                  {smsPeriodEnd
+                    ? smsPeriodEnd.toLocaleDateString("es", { day: "2-digit", month: "short", year: "numeric" })
+                    : "Hoy"}
+                </AppText>
+                <TouchableOpacity onPress={() => setShowSmsPeriodPicker((v) => !v)} hitSlop={8}>
+                  <AppText style={styles.smsPeriodToggle}>
+                    {showSmsPeriodPicker ? "Ocultar fechas" : "Fechas exactas"}
+                  </AppText>
+                </TouchableOpacity>
+              </View>
+              {showSmsPeriodPicker && (
+                <View>
+                  <AppText style={[styles.smsPeriodLabel, { marginTop: 4 }]}>Desde</AppText>
+                  <CalendarPicker
+                    selected={smsPeriodStart ?? new Date()}
+                    onSelect={(d) => setSmsPeriodStart(d)}
+                  />
+                  <AppText style={[styles.smsPeriodLabel, { marginTop: 12 }]}>Hasta</AppText>
+                  <CalendarPicker
+                    selected={smsPeriodEnd ?? new Date()}
+                    onSelect={(d) => setSmsPeriodEnd(d)}
+                  />
+                </View>
+              )}
+            </View>
+
             {smsPermission === "unknown" && smsList.length === 0 && !smsSearching && (
               <View style={styles.smsEmptyState}>
                 <View style={styles.smsEmptyIconWrap}>
@@ -931,19 +1094,25 @@ export default function FinanceScreen() {
 
             {smsPermission === "denied" && (
               <View style={styles.smsEmptyState}>
-                <View style={[styles.smsEmptyIconWrap, { borderColor: colors.error }]}>
-                  <Ionicons name="close-circle-outline" size={40} color={colors.error} />
+                <View style={[styles.smsEmptyIconWrap, { borderColor: colors.warning }]}>
+                  <Ionicons name="shield-checkmark-outline" size={40} color={colors.warning} />
                 </View>
-                <AppText style={[styles.smsEmptyTitle, { color: colors.error }]}>
-                  Permiso denegado
+                <AppText style={[styles.smsEmptyTitle, { color: colors.warning }]}>
+                  Permiso restringido
                 </AppText>
                 <AppText style={styles.smsEmptyDesc}>
-                  No se concedió el acceso a SMS. Puede intentarse de nuevo.
+                  Android 14+ bloquea el acceso a SMS en apps instaladas fuera de Play Store. Actívalo manualmente: Ajustes del sistema → Aplicaciones → Kiora → Menú (⋮) → Mostrar ajustes restringidos → activar SMS. Luego reintenta.
                 </AppText>
-                <TouchableOpacity style={styles.smsStartButton} onPress={handleSmsScan}>
-                  <Ionicons name="refresh-outline" size={20} color={colors.surface} />
-                  <AppText style={styles.smsStartButtonText}>Intentar de nuevo</AppText>
-                </TouchableOpacity>
+                <View style={{ flexDirection: "row", gap: 10, marginTop: 20 }}>
+                  <TouchableOpacity style={styles.smsStartButton} onPress={handleSmsScan}>
+                    <Ionicons name="refresh-outline" size={20} color={colors.surface} />
+                    <AppText style={styles.smsStartButtonText}>Reintentar</AppText>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={[styles.smsStartButton, { backgroundColor: colors.border }]} onPress={openRestrictedSettings}>
+                    <Ionicons name="settings-outline" size={20} color={colors.textPrimary} />
+                    <AppText style={[styles.smsStartButtonText, { color: colors.textPrimary }]}>Abrir Ajustes</AppText>
+                  </TouchableOpacity>
+                </View>
               </View>
             )}
 
@@ -958,7 +1127,7 @@ export default function FinanceScreen() {
                 <AppText style={styles.smsEmptyDesc}>
                   El permiso fue denegado permanentemente. Para activarlo se debe ir a Ajustes del sistema, buscar Kiora en la lista de aplicaciones y habilitar el permiso de SMS.
                 </AppText>
-                <TouchableOpacity style={styles.smsStartButton} onPress={openAppSettings}>
+                <TouchableOpacity style={styles.smsStartButton} onPress={openRestrictedSettings}>
                   <Ionicons name="settings-outline" size={20} color={colors.surface} />
                   <AppText style={styles.smsStartButtonText}>Abrir Ajustes</AppText>
                 </TouchableOpacity>
@@ -990,9 +1159,25 @@ export default function FinanceScreen() {
                     {" · toca los que deseas registrar"}
                   </AppText>
                 </View>
+                <View style={styles.smsSearchRow}>
+                  <Ionicons name="search" size={16} color={colors.textSecondary} />
+                  <TextInput
+                    style={styles.smsSearchInput}
+                    placeholder={"Buscar por comercio, remitente o texto..."}
+                    placeholderTextColor={colors.textSecondary}
+                    value={smsQuery}
+                    onChangeText={setSmsQuery}
+                    returnKeyType="search"
+                  />
+                  {smsQuery.length > 0 && (
+                    <TouchableOpacity onPress={() => setSmsQuery("")} hitSlop={8}>
+                      <Ionicons name="close-circle" size={16} color={colors.textSecondary} />
+                    </TouchableOpacity>
+                  )}
+                </View>
                 <View style={styles.smsFilterRow}>
                   {([
-                    ["all", `Todos (${smsList.length})`],
+                    ["all", `Todos (${smsCounts.expense + smsCounts.income})`],
                     ["expense", `Gastos (${smsCounts.expense})`],
                     ["income", `Ingresos (${smsCounts.income})`],
                   ] as const).map(([key, label]) => {
@@ -1014,7 +1199,9 @@ export default function FinanceScreen() {
                 {visibleSms.length === 0 ? (
                   <View style={styles.smsFilterEmpty}>
                     <AppText style={styles.smsEmptyDesc}>
-                      No hay movimientos de este tipo.
+                      {smsQuery.trim()
+                        ? "Sin coincidencias para la búsqueda."
+                        : "No hay movimientos de este tipo en el periodo."}
                     </AppText>
                   </View>
                 ) : (
@@ -1033,7 +1220,7 @@ export default function FinanceScreen() {
                         </View>
                         <View style={{ flex: 1, minWidth: 0 }}>
                           <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
-                            <AppText style={[styles.smsCardAmount, { color: m.type === "income" ? colors.success : colors.error }]}>
+                            <AppText style={[styles.smsCardAmount, { color: m.type === "income" ? colors.chartPositive || colors.success : colors.chartNegative || colors.error }]}>
                               {m.type === "income" ? "+" : "-"}{formatCurrency(m.amount)}
                             </AppText>
                             <AppText style={styles.smsCardDate}>
@@ -1043,8 +1230,9 @@ export default function FinanceScreen() {
                           <AppText style={styles.smsCardDesc} numberOfLines={2}>
                             {m.description || m.rawBody.slice(0, 60)}
                           </AppText>
-                          <AppText style={styles.smsCardMeta}>
-                            {m.sender ? `${m.sender}` : ""}
+                          <AppText style={[styles.smsCardMeta, { color: m.type === "income" ? colors.chartPositive || colors.success : colors.chartNegative || colors.error }]}>
+                            {m.store && <AppText style={[styles.smsCardStore, { color: m.type === "income" ? colors.chartPositive || colors.success : colors.chartNegative || colors.error }]}>{m.store} · </AppText>}
+                            {m.senderLabel || m.sender}
                           </AppText>
                         </View>
                       </TouchableOpacity>
@@ -1068,7 +1256,7 @@ export default function FinanceScreen() {
         </View>
       ) : (
         <>
-          <ScrollView contentContainerStyle={styles.scroll}>
+          <ScrollView contentContainerStyle={styles.scroll} nestedScrollEnabled>
 
         {/* ── Tarjeta de periodos (gráfico + estadísticas) ── */}
         <GlowView style={styles.periodCard} cardRadius={12}>
@@ -1100,19 +1288,25 @@ export default function FinanceScreen() {
             ref={scrollRef}
             horizontal
             pagingEnabled
+            directionalLockEnabled
+            nestedScrollEnabled
             showsHorizontalScrollIndicator={false}
             onMomentumScrollEnd={handlePeriodScroll}
             scrollEventThrottle={32}
           >
             {statsByPeriod.map((stats, i) => {
               const data = breakdownByPeriod[i];
-              // El eje Y debe escalar sobre todas las series, incluida la de ahorro.
-              const maxVal = Math.max(...data.map((d) => Math.max(d.income, d.expenses, d.savings ?? 0)), 1);
+              // El tope de la escala es el día MÁS alto del periodo; la
+              // tolerancia del 25% queda por encima, así el pico nunca se
+              // sale del área del gráfico y el eje Y marca el máximo real.
+              const series = data.map((d) => Math.max(d.income, d.expenses, d.savings ?? 0));
+              const realMax = Math.max(...series, 1);
+              const maxVal = realMax + realMax / 4;
               const isPositive = stats.balance >= 0;
 
               const xLabels =
                 i === 0 ? DAYS_ES :
-                i === 1 ? ["Sem 1", "Sem 2", "Sem 3", "Sem 4"] :
+                i === 1 ? Array.from({ length: data.length }, (_, d) => String(d + 1)) :
                 MONTHS_ES_SHORT;
 
               const now = new Date();
@@ -1133,7 +1327,6 @@ export default function FinanceScreen() {
 
               return (
                 <View key={i} style={[styles.page, { width: cardWidth }]}>
-                  {/* Navegación de periodo */}
                   <View style={styles.monthNav}>
                     <TouchableOpacity
                       onPress={onPrevNav}
@@ -1155,28 +1348,13 @@ export default function FinanceScreen() {
                     </TouchableOpacity>
                   </View>
 
-                  {/* Gráfico con eje Y */}
                   <View style={styles.chartRow}>
-                    <YAxis maxVal={maxVal} />
+                    <YAxis maxVal={realMax} scaleMax={maxVal} />
                     <View style={{ flex: 1 }}>
-                      <FinanceLineChart data={data} maxVal={maxVal} showSavings={savingsStatEnabled} />
-                      <View style={styles.xLabels}>
-                        {xLabels.map((label, j) => (
-                          <View key={j} style={styles.xLabelCell}>
-                            <AppText
-                              style={styles.xLabel}
-                              numberOfLines={1}
-                              disableHorizontalPadding
-                            >
-                              {label}
-                            </AppText>
-                          </View>
-                        ))}
-                      </View>
+                      <FinanceLineChart data={data} maxVal={maxVal} topLabel={realMax} showSavings={savingsStatEnabled} labels={xLabels} labelSize={i === 1 ? MONTH_LABEL_SIZE : 9} />
                     </View>
                   </View>
 
-                  {/* Fila de estadísticas */}
                   <View style={styles.statsRow}>
                     <View style={styles.statItem}>
                       <AppText style={[styles.statLabel, styles.textCenter]}>Ingresos</AppText>
@@ -1245,6 +1423,22 @@ export default function FinanceScreen() {
         <View style={styles.sectionRow}>
           <AppText style={styles.sectionTitle}>Movimientos</AppText>
           <View style={styles.sectionRowActions}>
+            {transactions.length > 10 && (
+              <TouchableOpacity
+                style={styles.txMoreBadge}
+                onPress={() => setAllTxVisible(true)}
+                activeOpacity={0.7}
+              >
+                <Ionicons
+                  name="expand-outline"
+                  size={13}
+                  color={colors.primary}
+                />
+                <AppText style={styles.txMoreBadgeText}>
+                  {`Ver ${transactions.length - 10} más`}
+                </AppText>
+              </TouchableOpacity>
+            )}
             <TouchableOpacity
               style={styles.importButton}
               onPress={() => setRecurListVisible(true)}
@@ -1278,16 +1472,15 @@ export default function FinanceScreen() {
             subtitle="Tus transacciones aparecerán aquí"
           />
         ) : (
-          transactions.map((tx) => (
-            <TransactionCard key={tx.id} item={tx} onPress={() => openEdit(tx)} />
+          transactions.slice(0, 10).map((tx) => (
+            <TransactionCard key={tx.id} item={tx} onPress={openDetail} onLongPress={openEdit} />
           ))
         )}
 
-        <View style={{ height: 88 }} />
+        <View style={{ height: bottomPad + 88 }} />
       </ScrollView>
 
-      {/* FAB */}
-      <TouchableOpacity style={styles.fab} onPress={openAdd}>
+      <TouchableOpacity style={[styles.fab, { bottom: bottomPad + 20 }]} onPress={openAdd}>
         <Ionicons name="add" size={28} color={colors.surface} />
       </TouchableOpacity>
 
@@ -1306,7 +1499,9 @@ export default function FinanceScreen() {
             <View style={styles.modalHeader}>
               <AppText style={styles.modalTitle}>
                 {editingTx
-                  ? (isExpense ? "Editar gasto" : "Editar ingreso")
+                  ? isRecurring
+                    ? (isExpense ? "Editar gasto recurrente" : "Editar ingreso recurrente")
+                    : (isExpense ? "Editar gasto" : "Editar ingreso")
                   : isRecurring
                     ? (isExpense ? "Nuevo gasto recurrente" : "Nuevo ingreso recurrente")
                     : (isExpense ? "Nuevo gasto" : "Nuevo ingreso")}
@@ -1321,16 +1516,19 @@ export default function FinanceScreen() {
               keyboardShouldPersistTaps="handled"
             >
               {/* Grid 2x2 de tipos: gasto, ingreso y sus variantes recurrentes.
-                  En edición los recurrentes se deshabilitan (se editan desde la lista). */}
+                  En edición el bloque recurrente/puntual se fija según el origen
+                  del movimiento: no se puede convertir uno en el otro. */}
               <View style={styles.kindGrid}>
                 {([
-                  ["expense", "remove-circle-outline", "Gasto", colors.error],
-                  ["income", "add-circle-outline", "Ingreso", colors.success],
-                  ["recurring_expense", "repeat", "Gasto recurrente", colors.error],
-                  ["recurring_income", "repeat", "Ingreso recurrente", colors.success],
+                  ["expense", "remove-circle-outline", "Gasto", colors.chartNegative || colors.error],
+                  ["income", "add-circle-outline", "Ingreso", colors.chartPositive || colors.success],
+                  ["recurring_expense", "repeat", "Gasto recurrente", colors.chartNegative || colors.error],
+                  ["recurring_income", "repeat", "Ingreso recurrente", colors.chartPositive || colors.success],
                 ] as const).map(([kind, icon, label, tint]) => {
                   const active = formKind === kind;
-                  const disabled = editingTx !== null && (kind === "recurring_expense" || kind === "recurring_income");
+                  const editingIsRecurring = editingTx?.recurringId != null;
+                  const kIsRecurring = kind === "recurring_expense" || kind === "recurring_income";
+                  const disabled = editingTx !== null && kIsRecurring !== editingIsRecurring;
                   return (
                     <TouchableOpacity
                       key={kind}
@@ -1364,7 +1562,6 @@ export default function FinanceScreen() {
                 returnKeyType="next"
               />
 
-              {/* Monto con teclado numérico */}
               <GlowView style={styles.amountDisplay} cardRadius={12}>
                 <AppText style={styles.amountDisplayText}>
                   {formatCurrency(parseFloat(amount) || 0)}
@@ -1451,7 +1648,6 @@ export default function FinanceScreen() {
                 </>
               ) : (
                 <>
-                  {/* Selector de fecha */}
                   <AppText style={[styles.label, { marginTop: 4 }]}>Fecha</AppText>
                   <View style={styles.dateModeRow}>
                     <TouchableOpacity
@@ -1618,6 +1814,40 @@ export default function FinanceScreen() {
         </View>
       </Modal>
 
+      {/* Lista completa de movimientos (modal a pantalla completa) */}
+      <Modal
+        animationType="slide"
+        visible={allTxVisible}
+        onRequestClose={() => setAllTxVisible(false)}
+      >
+        <View style={styles.fullModalContainer}>
+          <View style={styles.modalHeader}>
+            <AppText style={styles.modalTitle}>Movimientos</AppText>
+            <TouchableOpacity onPress={() => setAllTxVisible(false)}>
+              <Ionicons name="close" size={24} color={colors.textPrimary} />
+            </TouchableOpacity>
+          </View>
+          <ScrollView contentContainerStyle={styles.fullModalScroll}>
+            {transactions.length === 0 ? (
+              <EmptyState
+                icon="wallet-outline"
+                title="Sin movimientos"
+                subtitle="Tus transacciones aparecerán aquí"
+              />
+            ) : (
+              transactions.map((tx) => (
+                <TransactionCard
+                  key={tx.id}
+                  item={tx}
+                  onPress={openDetail}
+                  onLongPress={openEdit}
+                />
+              ))
+            )}
+          </ScrollView>
+        </View>
+      </Modal>
+
       {/* Lista de movimientos recurrentes (gastos e ingresos) */}
       <Modal
         animationType="slide"
@@ -1662,7 +1892,7 @@ export default function FinanceScreen() {
                         activeOpacity={0.7}
                       >
                         <View style={styles.recurIconWrap}>
-                          <Ionicons name="repeat" size={16} color={isIncome ? colors.success : colors.error} />
+                          <Ionicons name="repeat" size={16} color={isIncome ? colors.chartPositive || colors.success : colors.chartNegative || colors.error} />
                         </View>
                         <View style={styles.recurContent}>
                           <AppText style={styles.recurTitle} numberOfLines={1}>
@@ -1673,7 +1903,7 @@ export default function FinanceScreen() {
                             {next.toLocaleDateString("es", { day: "numeric", month: "short" })}
                           </AppText>
                         </View>
-                        <AppText style={[styles.recurAmount, { color: isIncome ? colors.success : colors.error }]} numberOfLines={1}>
+                        <AppText style={[styles.recurAmount, { color: isIncome ? colors.chartPositive || colors.success : colors.chartNegative || colors.error }]} numberOfLines={1}>
                           {isIncome ? "+" : "-"}{formatCurrency(item.amount)}
                         </AppText>
                         <Ionicons name="chevron-forward" size={14} color={colors.textSecondary} />
@@ -1714,7 +1944,6 @@ export default function FinanceScreen() {
               contentContainerStyle={styles.modalScroll}
               keyboardShouldPersistTaps="handled"
             >
-              {/* Selector gasto/ingreso del recurrente */}
               <View style={styles.typeSelector}>
                 <TouchableOpacity
                   style={[styles.typeButton, recType === "expense" && styles.expenseBg]}
@@ -1743,7 +1972,6 @@ export default function FinanceScreen() {
                 returnKeyType="next"
               />
 
-              {/* Monto con teclado numérico */}
               <GlowView style={styles.amountDisplay} cardRadius={12}>
                 <AppText style={styles.amountDisplayText}>
                   {formatCurrency(parseFloat(recAmount) || 0)}
@@ -1854,22 +2082,37 @@ export default function FinanceScreen() {
       </Modal>
         </>
       )}
+
+      {/* Modal de detalle: toque simple en la tarjeta; editar vía botón o
+          manteniendo presionada la tarjeta */}
+      {viewingTx && (
+        <TransactionDetailModal
+          item={viewingTx}
+          recurringLabel={viewingTxRecurring?.description}
+          recurringInterval={viewingTxRecurring?.interval}
+          onClose={() => setViewingTx(null)}
+          onEdit={(tx) => {
+            setViewingTx(null);
+            openEdit(tx);
+          }}
+          onDelete={handleDelete}
+        />
+      )}
     </View>
   );
 }
 
-function getStyles(colors: ThemeColors) {
+function getStyles(colors: ThemeColors, bottomPad = 0) {
   return StyleSheet.create({
     container: {
       flex: 1,
       backgroundColor: colors.background,
     },
     scroll: {
-      flex: 1,
+      flexGrow: 1,
       padding: 16,
     },
 
-    // Period card
     periodCard: {
       backgroundColor: colors.surface,
       borderColor: colors.border,
@@ -1909,19 +2152,6 @@ function getStyles(colors: ThemeColors) {
       paddingHorizontal: 16,
       paddingTop: 16,
       paddingBottom: 4,
-    },
-    xLabels: {
-      flexDirection: "row",
-      marginTop: 4,
-      marginBottom: 4,
-    },
-    xLabelCell: {
-      flex: 1,
-      alignItems: "center",
-    },
-    xLabel: {
-      fontSize: 9,
-      color: colors.textSecondary,
     },
     statsRow: {
       flexDirection: "row",
@@ -1998,14 +2228,12 @@ function getStyles(colors: ThemeColors) {
       marginRight: 8,
     },
 
-    // Transactions
     sectionTitle: {
       fontSize: 16,
       fontWeight: "700",
       color: colors.textPrimary,
     },
 
-    // FAB
     fab: {
       position: "absolute",
       right: 20,
@@ -2018,7 +2246,6 @@ function getStyles(colors: ThemeColors) {
       alignItems: "center",
     },
 
-    // Modal
     modalOverlay: {
       flex: 1,
       backgroundColor: "rgba(0,0,0,0.5)",
@@ -2040,10 +2267,9 @@ function getStyles(colors: ThemeColors) {
       fontWeight: "700",
       color: colors.textPrimary,
     },
-    smsScroll: {
+smsScroll: {
       padding: 16,
-      paddingBottom: 40,
-      flexGrow: 1,
+      paddingBottom: 40 + bottomPad,
     },
     smsEmptyState: {
       flex: 1,
@@ -2111,6 +2337,49 @@ function getStyles(colors: ThemeColors) {
       gap: 8,
       marginBottom: 14,
     },
+    smsPeriodBlock: {
+      marginBottom: 8,
+    },
+    smsPeriodLabel: {
+      fontSize: 13,
+      fontWeight: "600",
+      color: colors.textSecondary,
+      marginBottom: 8,
+    },
+    smsPeriodRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+      marginBottom: 14,
+    },
+    smsPeriodRange: {
+      fontSize: 13,
+      color: colors.textPrimary,
+      flex: 1,
+    },
+    smsPeriodToggle: {
+      fontSize: 13,
+      fontWeight: "600",
+      color: colors.primary,
+      marginLeft: 12,
+    },
+    smsSearchRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 8,
+      backgroundColor: colors.background,
+      borderWidth: 1,
+      borderColor: colors.border,
+      borderRadius: 10,
+      paddingHorizontal: 12,
+      marginBottom: 14,
+    },
+    smsSearchInput: {
+      flex: 1,
+      paddingVertical: 10,
+      fontSize: 14,
+      color: colors.textPrimary,
+    },
     smsFilterChip: {
       paddingVertical: 7,
       paddingHorizontal: 14,
@@ -2143,6 +2412,11 @@ function getStyles(colors: ThemeColors) {
       fontSize: 12,
       color: colors.textSecondary,
     },
+    smsCardStore: {
+      fontSize: 13,
+      fontWeight: "700",
+      color: colors.primary,
+    },
     smsAddButton: {
       flexDirection: "row",
       alignItems: "center",
@@ -2158,7 +2432,7 @@ function getStyles(colors: ThemeColors) {
       color: colors.surface,
     },
     modalView: {
-      backgroundColor: colors.surface,
+      backgroundColor: colors.background,
       borderTopLeftRadius: 20,
       borderTopRightRadius: 20,
       maxHeight: "90%",
@@ -2180,10 +2454,17 @@ function getStyles(colors: ThemeColors) {
     },
     modalScroll: {
       padding: 16,
-      paddingBottom: 32,
+      paddingBottom: 32 + bottomPad,
+    },
+    fullModalContainer: {
+      flex: 1,
+      backgroundColor: colors.background,
+    },
+    fullModalScroll: {
+      padding: 16,
+      paddingBottom: 40 + bottomPad,
     },
 
-    // Form
     kindGrid: {
       flexDirection: "row",
       flexWrap: "wrap",
@@ -2235,10 +2516,10 @@ function getStyles(colors: ThemeColors) {
       color: colors.textSecondary,
     },
     expenseBg: {
-      backgroundColor: colors.error,
+      backgroundColor: colors.chartNegative || colors.error,
     },
     incomeBg: {
-      backgroundColor: colors.success,
+      backgroundColor: colors.chartPositive || colors.success,
     },
     whiteText: {
       color: colors.surface,
@@ -2357,7 +2638,6 @@ function getStyles(colors: ThemeColors) {
       color: colors.error,
     },
 
-    // Date mode selector
     dateModeRow: {
       flexDirection: "row",
       gap: 8,
@@ -2382,7 +2662,6 @@ function getStyles(colors: ThemeColors) {
       color: colors.textSecondary,
     },
 
-    // Amount display
     amountDisplay: {
       backgroundColor: colors.background,
       borderColor: colors.border,
@@ -2400,7 +2679,6 @@ function getStyles(colors: ThemeColors) {
       letterSpacing: -0.5,
     },
 
-    // Numpad
     numpad: {
       gap: 6,
       marginBottom: 16,
@@ -2425,7 +2703,6 @@ function getStyles(colors: ThemeColors) {
       color: colors.textPrimary,
     },
 
-    // Section row
     sectionRow: {
       flexDirection: "row",
       alignItems: "center",
@@ -2437,13 +2714,29 @@ function getStyles(colors: ThemeColors) {
       alignItems: "center",
       gap: 8,
     },
+    txMoreBadge: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 4,
+      borderWidth: 1,
+      borderColor: colors.primary,
+      borderRadius: 20,
+      paddingVertical: 4,
+      paddingHorizontal: 10,
+      backgroundColor: colors.primary + "14",
+    },
+    txMoreBadgeText: {
+      fontSize: 12,
+      fontWeight: "600",
+      color: colors.primary,
+    },
     savingsToggleWrap: {
       flexDirection: "row",
       alignItems: "center",
       gap: 4,
     },
     savingsColor: {
-      color: colors.success,
+      color: colors.chartPositive || colors.success,
     },
     importButton: {
       flexDirection: "row",
@@ -2461,7 +2754,6 @@ function getStyles(colors: ThemeColors) {
       fontWeight: "600",
     },
 
-    // Gastos recurrentes
     recurCard: {
       flexDirection: "row",
       alignItems: "center",
@@ -2551,7 +2843,6 @@ function getStyles(colors: ThemeColors) {
       color: colors.textPrimary,
     },
 
-    // Import modal
     importOptionCard: {
       flexDirection: "row",
       alignItems: "center",

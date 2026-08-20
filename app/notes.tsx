@@ -18,9 +18,11 @@ import GlowView from "../components/ui/GlowView";
 import AppText from "../components/ui/AppText";
 import EmptyState from "../components/ui/EmptyState";
 import { Note } from "../lib/storage/types";
+import { useSafeBottom } from "../hooks/useSafeBottom";
 
 export default function NotesScreen() {
   const colors = useTheme();
+  const bottomPad = useSafeBottom();
   const styles = getStyles(colors);
   const { notes, addNote, updateNote, updateLinks, togglePin, deleteNote, search, refresh } = useNotes();
   const { showAlert } = useAlert();
@@ -189,10 +191,14 @@ export default function NotesScreen() {
           />
         }
         style={{ flex: 1 }}
-        contentContainerStyle={styles.list}
+        contentContainerStyle={[styles.list, { paddingBottom: bottomPad + 88 }]}
       />
 
-      <TouchableOpacity style={styles.fab} onPress={handleOpenCreate} activeOpacity={0.8}>
+      <TouchableOpacity
+        style={[styles.fab, { bottom: bottomPad + 20 }]}
+        onPress={handleOpenCreate}
+        activeOpacity={0.8}
+      >
         <Ionicons name="add" size={28} color={colors.surface} />
       </TouchableOpacity>
 

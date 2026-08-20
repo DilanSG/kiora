@@ -11,7 +11,6 @@ type Props = {
   balance: number;
 };
 
-// Tarjeta de resumen de estadísticas financieras mensuales.
 export function MonthlyStats({ income, expenses, balance }: Props) {
   const colors = useTheme();
   const styles = getStyles(colors);

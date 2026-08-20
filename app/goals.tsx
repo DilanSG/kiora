@@ -1,4 +1,4 @@
-import React, { useMemo, useState, useEffect, useCallback } from "react";
+import React, { useMemo, useState, useEffect, useCallback, useRef } from "react";
 import {
   View,
   StyleSheet,
@@ -7,6 +7,7 @@ import {
   Platform,
   Modal,
   ScrollView,
+  Animated,
   LayoutChangeEvent,
   useWindowDimensions,
   type StyleProp,
@@ -33,15 +34,15 @@ import NoteModal from "../components/features/notes/NoteModal";
 import GlowView from "../components/ui/GlowView";
 import { CalendarPicker } from "../components/ui/CalendarPicker";
 import { formatCurrency, formatInput, formatNumber, parseAmountInput } from "../lib/currency";
+import { useSafeBottom } from "../hooks/useSafeBottom";
 
-// Pantalla de Metas: tarjetas mínimas con mapa mental tipo canvas al tocar cada tarjeta.
 export default function GoalsScreen() {
   const colors = useTheme();
-  const styles = getStyles(colors);
+  const bottomPad = useSafeBottom();
+  const styles = getStyles(colors, bottomPad);
 
   const {
     goals,
-    userPoints,
     createGoal,
     addStepToGoal,
     removeStep,
@@ -71,7 +72,6 @@ export default function GoalsScreen() {
   const [potInterval, setPotInterval] = useState<"weekly" | "monthly">("monthly");
   const [potTotal, setPotTotal] = useState("");
   const [potDate, setPotDate] = useState("");
-  const [ptsModalVisible, setPtsModalVisible] = useState(false);
   const [pickerVisible, setPickerVisible] = useState(false);
   const [objetoVisible, setObjetoVisible] = useState(false);
   const [objetoType, setObjetoType] = useState<"savings" | "payment">("savings");
@@ -147,14 +147,17 @@ export default function GoalsScreen() {
       return;
     }
     const date = potDate.trim();
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || isNaN(new Date(`${date}T00:00:00`).getTime())) {
-      showAlert("Atención", "Indica la fecha límite de la alcancía (YYYY-MM-DD).");
+    const hasDate = /^\d{4}-\d{2}-\d{2}$/.test(date) && !isNaN(new Date(`${date}T00:00:00`).getTime());
+    // En modo por periodos la fecha es obligatoria (de ella se derivan los
+    // aportes); en modo libre es opcional y sin fecha no hay límite.
+    if (potMode !== "free" && !hasDate) {
+      showAlert("Atención", "Indica la fecha límite de la alcancía.");
       return;
     }
     try {
       let created: Goal | null;
       if (potMode === "free") {
-        created = await createGoal(title, potDesc.trim() || undefined, date, "pot", undefined, undefined, totalAmount);
+        created = await createGoal(title, potDesc.trim() || undefined, hasDate ? date : undefined, "pot", undefined, undefined, totalAmount);
       } else {
         const periods = computePotPeriods(date, potInterval);
         created = await createGoal(title, potDesc.trim() || undefined, date, "pot", periods, potInterval, totalAmount);
@@ -185,17 +188,19 @@ export default function GoalsScreen() {
       return;
     }
     if (objetoType === "savings") {
-      // Mismo esquema que la alcancía: fecha límite y, si es por periodos,
-      // el número de aportes se deriva de la frecuencia y la fecha.
+      // La fecha es obligatoria solo en modo por periodos (de ella se
+      // derivan los aportes); en modo libre es opcional y sin fecha la
+      // meta no tiene límite.
       const date = objetoLimitDate.trim();
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || isNaN(new Date(`${date}T00:00:00`).getTime())) {
+      const hasDate = /^\d{4}-\d{2}-\d{2}$/.test(date) && !isNaN(new Date(`${date}T00:00:00`).getTime());
+      if (objetoMode !== "free" && !hasDate) {
         showAlert("Atención", "Indica la fecha para tenerlo ahorrado.");
         return;
       }
       try {
         const created =
           objetoMode === "free"
-            ? await createGoal(title, undefined, date, "savings", undefined, undefined, total)
+            ? await createGoal(title, undefined, hasDate ? date : undefined, "savings", undefined, undefined, total)
             : await createGoal(title, undefined, date, "savings", computePotPeriods(date, objetoInterval), objetoInterval, total);
         triggerNotification("Meta creada", "success");
         setObjetoVisible(false);
@@ -245,7 +250,7 @@ export default function GoalsScreen() {
       const transitioned = await finalizeGoal(goal.id);
       if (transitioned) {
         triggerNotification(
-          `"${goal.title}" completada · +50 puntos`,
+          `"${goal.title}" completada · +50 koins`,
           "success"
         );
       }
@@ -282,12 +287,6 @@ export default function GoalsScreen() {
       {/* Header */}
       <View style={styles.header}>
         <AppText style={styles.screenTitle}>Metas</AppText>
-        <TouchableOpacity onPress={() => setPtsModalVisible(true)} activeOpacity={0.7}>
-          <View style={styles.pointsBadge}>
-            <Ionicons name="star" size={13} color={colors.warning} />
-            <AppText style={styles.pointsText}>{userPoints} pts</AppText>
-          </View>
-        </TouchableOpacity>
       </View>
 
       {error ? (
@@ -570,11 +569,6 @@ export default function GoalsScreen() {
 
               {objetoType === "savings" ? (
                 <>
-                  <DateField
-                    label="Fecha para tenerlo ahorrado"
-                    date={objetoLimitDate}
-                    onChange={setObjetoLimitDate}
-                  />
                   <AppText style={styles.label}>¿Cómo ahorrarás?</AppText>
                   <View style={{ flexDirection: "row", gap: 8, marginBottom: 16 }}>
                     <TouchableOpacity
@@ -596,6 +590,8 @@ export default function GoalsScreen() {
                   </View>
                   {objetoMode === "periodic" ? (
                     <>
+                      {/* El periodo se elige primero: de él depende cuándo puede
+                          empezar la fecha límite en el calendario. */}
                       <AppText style={styles.label}>Frecuencia de aportes</AppText>
                       <View style={{ flexDirection: "row", gap: 8, marginBottom: 16 }}>
                         <TouchableOpacity
@@ -615,6 +611,22 @@ export default function GoalsScreen() {
                           </AppText>
                         </TouchableOpacity>
                       </View>
+
+                      {/* Fecha inicial del ahorro: es solo informativa y coincide
+                          con el día en que se crea la meta. */}
+                      <AppText style={styles.label}>
+                        Inicia en:{" "}
+                        {new Date().toLocaleDateString("es", { day: "numeric", month: "long", year: "numeric" })}
+                      </AppText>
+
+                      {/* La fecha límite no puede caer en el periodo en curso:
+                          semanal exige al menos 7 días, mensual al menos 30. */}
+                      <DateField
+                        label="Fecha para tenerlo ahorrado"
+                        date={objetoLimitDate}
+                        onChange={setObjetoLimitDate}
+                        minDate={new Date(Date.now() + (objetoInterval === "weekly" ? 7 : 30) * 86400000)}
+                      />
                       {(() => {
                         const total = parseAmountInput(objetoTotal);
                         const date = objetoLimitDate.trim();
@@ -639,9 +651,19 @@ export default function GoalsScreen() {
                       })()}
                     </>
                   ) : (
-                    <AppText style={[styles.label, { color: colors.textSecondary }]}>
-                      Añadirás aportes cuando quieras hasta alcanzar el valor del objeto.
-                    </AppText>
+                    <>
+                      <AppText style={[styles.label, { color: colors.textSecondary }]}>
+                        Añadirás aportes cuando quieras hasta alcanzar el valor del objeto.
+                      </AppText>
+                      {/* La fecha es opcional en modo libre: sin fecha la meta
+                          no tiene límite y se va completando con los aportes. */}
+                      <DateField
+                        label="Fecha en la que quisiera tenerlo (opcional)"
+                        date={objetoLimitDate}
+                        onChange={setObjetoLimitDate}
+                        optional
+                      />
+                    </>
                   )}
                 </>
               ) : (
@@ -676,13 +698,34 @@ export default function GoalsScreen() {
                     </TouchableOpacity>
                   </View>
                   {objetoTotal && objetoInstallments && (parseAmountInput(objetoTotal) ?? 0) > 0 && parseInt(objetoInstallments) > 0 && (
-                    <View style={{ paddingVertical: 8 }}>
+                    <View style={{ paddingVertical: 8, gap: 6 }}>
                       <AppText style={{ fontSize: 13, color: colors.textSecondary, textAlign: "center" }}>
                         Pago por fecha:{" "}
                         <AppText style={{ fontWeight: "700", color: colors.textPrimary }}>
                           {formatCurrency((parseAmountInput(objetoTotal) ?? 0) / parseInt(objetoInstallments))}
                         </AppText>
                       </AppText>
+                      {/* Desglose de cuotas con su fecha de pago: la primera
+                          arranca en el primer periodo tras la creación. */}
+                      {Array.from({ length: Math.min(parseInt(objetoInstallments), 6) }, (_, i) => {
+                        const days = objetoInterval === "weekly" ? 7 : 30;
+                        const due = new Date(Date.now() + (i + 1) * days * 86400000);
+                        return (
+                          <View key={i} style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", borderWidth: 1, borderColor: colors.border, borderRadius: 10, paddingVertical: 8, paddingHorizontal: 12 }}>
+                            <AppText style={{ fontSize: 13, color: colors.textSecondary }}>
+                              Cuota {i + 1}
+                            </AppText>
+                            <AppText style={{ fontSize: 13, color: colors.textPrimary }}>
+                              {due.toLocaleDateString("es", { day: "numeric", month: "short" })}
+                            </AppText>
+                          </View>
+                        );
+                      })}
+                      {parseInt(objetoInstallments) > 6 && (
+                        <AppText style={{ fontSize: 12, color: colors.textSecondary, textAlign: "center" }}>
+                          + {parseInt(objetoInstallments) - 6} cuotas más
+                        </AppText>
+                      )}
                     </View>
                   )}
                 </>
@@ -752,12 +795,6 @@ export default function GoalsScreen() {
                 returnKeyType="next"
               />
 
-              <DateField
-                label="Fecha para tenerlo ahorrado"
-                date={potDate}
-                onChange={setPotDate}
-              />
-
               <AppText style={styles.label}>¿Cómo ahorrarás?</AppText>
               <View style={{ flexDirection: "row", gap: 8, marginBottom: 16 }}>
                 <TouchableOpacity
@@ -799,6 +836,13 @@ export default function GoalsScreen() {
                       </AppText>
                     </TouchableOpacity>
                   </View>
+                  {/* La fecha es necesaria en modo por periodos: de ella se
+                      derivan el número de aportes y el monto de cada uno. */}
+                  <DateField
+                    label="Fecha deseada para tener el ahorro"
+                    date={potDate}
+                    onChange={setPotDate}
+                  />
                   {(() => {
                     const total = parseAmountInput(potTotal);
                     const date = potDate.trim();
@@ -817,9 +861,19 @@ export default function GoalsScreen() {
                   })()}
                 </>
               ) : (
-                <AppText style={[styles.label, { color: colors.textSecondary }]}>
-                  Añadirás aportes cuando quieras hasta alcanzar el monto deseado.
-                </AppText>
+                <>
+                  <AppText style={[styles.label, { color: colors.textSecondary }]}>
+                    Añadirás aportes cuando quieras hasta alcanzar el monto deseado.
+                  </AppText>
+                  {/* La fecha es opcional en modo libre: sin fecha la alcancía
+                      no tiene límite y se completa según los aportes. */}
+                  <DateField
+                    label="Fecha deseada para tener el ahorro (opcional)"
+                    date={potDate}
+                    onChange={setPotDate}
+                    optional
+                  />
+                </>
               )}
 
               <TouchableOpacity style={styles.saveBtn} onPress={handleSavePot}>
@@ -962,66 +1016,6 @@ export default function GoalsScreen() {
         />
       ) : null}
 
-      {/* Modal: explicación de puntos */}
-      <Modal visible={ptsModalVisible} transparent animationType="fade" onRequestClose={() => setPtsModalVisible(false)}>
-        <View style={styles.ptsOverlay}>
-          <GlowView style={styles.ptsCard} cardRadius={12}>
-            <View style={styles.ptsHeader}>
-              <AppText style={styles.ptsTitle}>¿Qué son los puntos?</AppText>
-              <TouchableOpacity onPress={() => setPtsModalVisible(false)}>
-                <Ionicons name="close" size={22} color={colors.textSecondary} />
-              </TouchableOpacity>
-            </View>
-
-            <AppText style={styles.ptsDesc}>
-              Los puntos son una recompensa por completar metas. Se pueden usar en la tienda de temas
-              para personalizar la apariencia de la app.
-            </AppText>
-
-            <View style={styles.ptsDivider} />
-
-            <AppText style={styles.ptsSubtitle}>Cómo ganar puntos</AppText>
-
-            <View style={styles.ptsRow}>
-              <View style={[styles.ptsIconWrap, { backgroundColor: colors.primary + "18" }]}>
-                <Ionicons name="checkbox-outline" size={18} color={colors.primary} />
-              </View>
-              <View style={styles.ptsRowText}>
-                <AppText style={styles.ptsRowTitle}>Completar un paso</AppText>
-                <AppText style={styles.ptsRowDesc}>+5 puntos por cada paso completado</AppText>
-              </View>
-            </View>
-
-            <View style={styles.ptsRow}>
-              <View style={[styles.ptsIconWrap, { backgroundColor: colors.success + "18" }]}>
-                <Ionicons name="trophy-outline" size={18} color={colors.success} />
-              </View>
-              <View style={styles.ptsRowText}>
-                <AppText style={styles.ptsRowTitle}>Completar una meta</AppText>
-                <AppText style={styles.ptsRowDesc}>+50 puntos al finalizar la meta completa</AppText>
-              </View>
-            </View>
-
-            <View style={styles.ptsDivider} />
-
-            <AppText style={styles.ptsSubtitle}>Cómo gastar puntos</AppText>
-
-            <View style={styles.ptsRow}>
-              <View style={[styles.ptsIconWrap, { backgroundColor: colors.warning + "18" }]}>
-                <Ionicons name="color-palette-outline" size={18} color={colors.warning} />
-              </View>
-              <View style={styles.ptsRowText}>
-                <AppText style={styles.ptsRowTitle}>Tienda de temas</AppText>
-                <AppText style={styles.ptsRowDesc}>Canjea 100 puntos por un tema nuevo en Ajustes → Personalización</AppText>
-              </View>
-            </View>
-
-            <TouchableOpacity style={styles.ptsBtn} onPress={() => setPtsModalVisible(false)}>
-              <AppText style={styles.ptsBtnText}>Entendido</AppText>
-            </TouchableOpacity>
-          </GlowView>
-        </View>
-      </Modal>
     </KeyboardAvoidingView>
   );
 }
@@ -1255,7 +1249,8 @@ type GoalDetailModalProps = {
 
 function GoalDetailModal({ goal, goals, onClose, onRequestComplete, addStepToGoal, removeStep, toggleStep, markInstallment, markInstallmentById, updateInstallment, addPotContribution, autoStartTutorial }: GoalDetailModalProps) {
   const colors = useTheme();
-  const styles = getStyles(colors);
+  const bottomPad = useSafeBottom();
+  const styles = getStyles(colors, bottomPad);
   const { triggerNotification } = useNotifications();
   const { showAlert } = useAlert();
 
@@ -1294,7 +1289,7 @@ function GoalDetailModal({ goal, goals, onClose, onRequestComplete, addStepToGoa
   const steps = liveGoal.steps;
   const isCompleted = liveGoal.status === "completed";
   const isIncomplete = liveGoal.status === "incomplete";
-  const isSavings = liveGoal.type === "savings";
+  const isSavings = liveGoal.type === "savings" || liveGoal.type === "payment";
   const isPot = liveGoal.type === "pot";
   // Ahorro libre de una meta de objeto: sin periodos, misma mecánica que la alcancía.
   const isFreeSavings = isSavings && (liveGoal.installments ?? 0) === 0;
@@ -1312,7 +1307,6 @@ function GoalDetailModal({ goal, goals, onClose, onRequestComplete, addStepToGoa
   const potRemaining = Math.max(0, potTotal - potAchieved);
   const potPct = potTotal > 0 ? Math.min(100, (potAchieved / potTotal) * 100) : 0;
 
-  // Modal de aporte (alcancía libre)
   const [contributionVisible, setContributionVisible] = useState(false);
   const [contributionAmount, setContributionAmount] = useState("");
 
@@ -1323,7 +1317,6 @@ function GoalDetailModal({ goal, goals, onClose, onRequestComplete, addStepToGoa
 
   // Tutorial de uso tipo coach-marks: spotlight sobre cada parte del detalle.
   const [tutorialVisible, setTutorialVisible] = useState(false);
-  const [tutorialReady, setTutorialReady] = useState(false);
   const [tutorialIndex, setTutorialIndex] = useState(0);
   const [tutorialTargetKey, setTutorialTargetKey] = useState<string | null>(null);
   const [tutorialRects, setTutorialRects] = useState<Record<string, Rect>>({});
@@ -1346,9 +1339,7 @@ function GoalDetailModal({ goal, goals, onClose, onRequestComplete, addStepToGoa
   // si la pill no existe (p. ej. "+" en metas sin pasos) avanza al siguiente.
   const handleTutorialTargetResolved = useCallback((key: string, rect: Rect | null) => {
     if (rect) storeTutorialRect(key, rect);
-    if (rect) {
-      setTutorialReady(true);
-    } else {
+    if (!rect) {
       setTutorialIndex((i) => i + 1);
     }
   }, [storeTutorialRect]);
@@ -1363,7 +1354,6 @@ function GoalDetailModal({ goal, goals, onClose, onRequestComplete, addStepToGoa
   const handleAddRect = useCallback(
     (rect: Rect) => {
       storeTutorialRect("add", rect);
-      setTutorialReady(true);
     },
     [storeTutorialRect]
   );
@@ -1373,121 +1363,164 @@ function GoalDetailModal({ goal, goals, onClose, onRequestComplete, addStepToGoa
     [tutorialRects]
   );
 
-  const tutorialSteps = useMemo(() => {
+const tutorialSteps = useMemo(() => {
+    // Los pasos recorren el mapa de abajo hacia arriba: se empieza por la
+    // fecha inicial (start, abajo), se explica cómo añadir, luego se muestra
+    // la pill (esperando a que exista si la meta está vacía), y se termina
+    // en la meta (arriba) y en las acciones de la barra superior. El primer
+    // paso combina el para qué del tipo de meta con su mecánica.
+    const closeStep = {
+      key: "close",
+      title: "Cerrar",
+      body: "La flecha cierra el detalle y vuelve a la lista de metas.",
+    };
     if (isPot || isFreeSavings) {
       if (potFree) {
+        // Alcancía libre / ahorro suelto: aportes voluntarios con el botón +.
+        const hasPills = (liveGoal.contributions ?? []).length > 0;
         return [
           {
-            key: "goal",
-            title: "Tu meta",
-            body: "Es el monto que se desea acumular. Al alcanzarlo, la meta se completará automáticamente.",
+            key: "start",
+            title: "Una alcancía sin compromisos",
+            body: "Sirve para guardar cuando se puede, sin cuotas fijas ni fechas forzadas: tú decides cuánto y cuándo aportar, por eso crece en la medida en que vayas guardando. La fecha inicial solo marca desde cuándo empieza el ahorro.",
           },
+          hasPills
+            ? {
+                key: "add",
+                title: "Añadir aporte",
+                body: "El botón + de la barra superior registra cada aporte, del monto que tú elijas en ese momento.",
+              }
+            : {
+                key: "add",
+                title: "Añadir tu primer aporte",
+                body: "Todavía no hay aportes. El botón + de la barra superior crea la primera tarjeta de aporte, que se resta del monto deseado.",
+              },
           {
             key: "savings",
             title: "Tus aportes",
-            body: "Cada pill representa un aporte realizado. Se resta del monto deseado y se muestra cuánto falta.",
+            body: "Cada tarjeta es un aporte voluntario ya hecho: no hay cuotas programadas, así que depende de tu constancia. Se suma lo que se guarda y se muestra cuánto falta. Si aún no hay ninguna, añádela con el +.",
           },
           {
-            key: "add",
-            title: "Añadir aporte",
-            body: "El botón + de la barra superior registra cada aporte de ahorro.",
+            key: "goal",
+            title: "Tu meta",
+            body: "Es el monto que se desea acumular. Al alcanzarlo con tus aportes, la meta se completará automáticamente.",
           },
-          {
-            key: "start",
-            title: "El inicio",
-            body: "La fecha en que comenzó el ahorro.",
-          },
-          {
-            key: "close",
-            title: "Cerrar",
-            body: "La flecha cierra el detalle y vuelve a la lista de metas.",
-          },
+          closeStep,
         ];
       }
+      // Alcancía por periodos: aportes calculados hasta la fecha límite.
       return [
+        {
+          key: "start",
+          title: "Una alcancía con ritmo",
+          body: "Busca combinar constancia y flexibilidad: la app divide el ahorro en periodos (semanales o mensuales) y calcula cuánto aportar en cada uno para llegar a la fecha límite. Si un periodo vence sin aportar, su monto se reparte entre los restantes y nada se pierde.",
+        },
         {
           key: "savings",
           title: "Tus aportes",
-          body: "Cada pill representa el aporte de un periodo. Al tocarla se puede marcar como aportada o editar su monto.",
+          body: "Cada tarjeta representa el aporte de un periodo. Al tocarla se puede marcar como aportada o editar su monto. Los periodos pasados sin aportar reparten su parte entre los que quedan, con un aviso.",
         },
         {
           key: "goal",
           title: "Tu meta",
           body: "Al cubrir todos los periodos, la meta se completará automáticamente.",
         },
-        {
-          key: "start",
-          title: "El inicio",
-          body: "Indica la fecha en que comenzó la alcancía.",
-        },
-        {
-          key: "close",
-          title: "Cerrar",
-          body: "La flecha cierra el detalle y vuelve a la lista de metas.",
-        },
+        closeStep,
       ];
     }
     if (isSavings) {
+      if (liveGoal.type === "payment") {
+        // Crédito: pagos programados con fecha de vencimiento.
+        return [
+          {
+            key: "start",
+            title: "Pagar algo en cuotas",
+            body: "Está pensada para financiar algo, como un crédito: en lugar de ahorrar, se salda una deuda, por eso cada cuota tiene su fecha de vencimiento y se marca como pagada una por una. El inicio indica cuándo comenzó el crédito, y los pagos suben hasta la última cuota.",
+          },
+          {
+            key: "savings",
+            title: "Los pagos",
+            body: "Cada tarjeta es un pago con su fecha límite. Al tocarla se puede marcar como pagado o editar su monto y fecha. Como el objetivo es saldar la deuda, todas las cuotas deben quedar pagadas para completar la meta.",
+          },
+          {
+            key: "goal",
+            title: "Tu meta",
+            body: "Al completar todos los pagos, la meta se completará automáticamente: el crédito queda saldado.",
+          },
+          closeStep,
+        ];
+      }
+      // Ahorro de un objeto con cuotas programadas calculadas por la app.
       return [
+        {
+          key: "start",
+          title: "Ahorrar con cuotas fijas",
+          body: "Sirve para no tener que decidir cuánto guardar cada vez: la app divide el valor del objeto en cuotas iguales, calcula el aporte de cada periodo y la fecha en que lo tendrías ahorrado. La fecha inicial marca desde cuándo corren las cuotas, y van subiendo hasta la meta.",
+        },
         {
           key: "savings",
           title: "Las cuotas",
-          body: "Al tocar una cuota se muestran su monto y su fecha, y desde allí se puede marcar como pagada o editar.",
+          body: "Cada tarjeta es una cuota ya calculada por la app, con su monto y su fecha. Al tocarla se puede marcar como pagada o editar. El compromiso es por periodo, a diferencia de la alcancía libre.",
         },
         {
           key: "goal",
           title: "Tu meta",
-          body: "Al completar todas las cuotas, la meta se completará automáticamente.",
+          body: "Al completar todas las cuotas, la meta se completará automáticamente: ya juntaste el valor del objeto.",
         },
-        {
-          key: "start",
-          title: "El inicio",
-          body: "Indica la fecha en que comenzó el plan de ahorro.",
-        },
-        {
-          key: "close",
-          title: "Cerrar",
-          body: "La flecha cierra el detalle y vuelve a la lista de metas.",
-        },
+        closeStep,
       ];
     }
+    // Objetivo con pasos: plan de acción que se completa acción por acción.
+    const hasPills = steps.length > 0;
     return [
+      {
+        key: "start",
+        title: "Un plan de acción en pasos",
+        body: "Sirve para metas que no dependen solo de dinero: en lugar de cuotas, se compone de pasos, cada uno una tarea concreta que acerca a la meta (preparar algo, aprender, organizar). El inicio es el punto de partida del plan y la meta espera arriba.",
+      },
+      hasPills
+        ? {
+            key: "add",
+            title: "Añadir pasos",
+            body: "Los botones + del mapa permiten añadir pasos intermedios entre el inicio y la meta: cada paso nuevo es una tarea del plan.",
+          }
+        : {
+            key: "add",
+            title: "Añadir tu primer paso",
+            body: "Todavía no hay pasos. Los botones + del mapa crean la primera tarjeta de paso, que se marca como completada al tocarla.",
+          },
+      {
+        key: "step",
+        title: "Los pasos",
+        body: "Tocar un paso permite marcarlo como completado (se solicita confirmación). Mantenerlo presionado permite ver o agregar una nota, exportarlo a Tareas o eliminarlo. Se completa una acción a la vez, no montos. Si aún no hay ninguno, añádelo con el +.",
+      },
       {
         key: "goal",
         title: "Tu meta",
         body: "Es la meta que se está construyendo. Al completar todos los pasos, se toca para finalizarla.",
       },
-      {
-        key: "step",
-        title: "Los pasos",
-        body: "Tocar un paso permite marcarlo como completado (se solicita confirmación). Mantenerlo presionado permite ver o agregar una nota, exportarlo a Tareas o eliminarlo.",
-      },
-      {
-        key: "add",
-        title: "Añadir pasos",
-        body: "Los botones + del mapa permiten añadir pasos intermedios entre el inicio y la meta.",
-      },
-      {
-        key: "start",
-        title: "El inicio",
-        body: "Es el punto de partida del plan. Los primeros pasos aparecen cerca de aquí.",
-      },
-      {
-        key: "close",
-        title: "Cerrar",
-        body: "La flecha cierra el detalle y vuelve a la lista de metas.",
-      },
+      closeStep,
     ];
-  }, [isSavings, isPot, isFreeSavings, potFree]);
+  }, [isSavings, isPot, isFreeSavings, potFree, liveGoal.type, liveGoal.contributions, steps.length]);
 
   const openTutorial = () => {
     setTutorialIndex(0);
     setTutorialVisible(true);
   };
 
+  // Pasos cuyo target aún no existe (meta vacía): la tarjeta se muestra sin
+  // spotlight para esperar a que el usuario cree la primera pill con el +.
+  const tutorialWaiting =
+    potFree && (liveGoal.contributions ?? []).length === 0
+      ? tutorialSteps[tutorialIndex]?.key === "savings"
+      : !isSavings && !isPot && steps.length === 0
+        ? tutorialSteps[tutorialIndex]?.key === "step"
+        : false;
+
   // Cada paso del tutorial pide al canvas que centre y mida su pill. El
-  // spotlight recién se muestra cuando esa medición llega (tutorialReady).
-  // El botón de cerrar no es una pill: lo resuelve aquí con su rect propio.
+  // spotlight se ancla al rect del paso anterior hasta que llegue el nuevo
+  // (el overlay anima la transición). El botón de cerrar no es una pill: lo
+  // resuelve aquí con su rect propio.
   React.useEffect(() => {
     if (!tutorialVisible) return;
     const step = tutorialSteps[tutorialIndex];
@@ -1495,16 +1528,14 @@ function GoalDetailModal({ goal, goals, onClose, onRequestComplete, addStepToGoa
       setTutorialVisible(false);
       return;
     }
-    setTutorialReady(false);
     if (step.key === "close") {
       // WindowBox ya re-mide el botón (measureRequest); solo hay que esperar
-      // su rect y mostrar el paso.
+      // su rect para que el spotlight pueda anclarse a él.
       let cancelled = false;
       let tries = 0;
       const tick = () => {
         if (cancelled) return;
         if (tutorialRectsRef.current.close) {
-          setTutorialReady(true);
           return;
         }
         tries += 1;
@@ -1637,9 +1668,14 @@ function GoalDetailModal({ goal, goals, onClose, onRequestComplete, addStepToGoa
       return;
     }
     if (isSavings || isPot) {
-      // Las metas de ahorro se finalizan solas al terminar todo el ahorro:
+      // Las metas de ahorro/pago se finalizan solas al terminar todo:
       // aquí solo se informa, no se abre confirmación de finalización.
-      triggerNotification("Termina todo el ahorro para completar la meta", "info");
+      triggerNotification(
+        liveGoal.type === "payment"
+          ? "Termina todos los pagos para completar la meta"
+          : "Termina todo el ahorro para completar la meta",
+        "info"
+      );
       return;
     }
     if (!allStepsCompleted) {
@@ -1655,7 +1691,7 @@ function GoalDetailModal({ goal, goals, onClose, onRequestComplete, addStepToGoa
   const handleMarkInstallment = async () => {
     try {
       await markInstallment(liveGoal.id);
-      triggerNotification("Pago registrado · +5 puntos", "success");
+      triggerNotification("Pago registrado · +5 koins", "success");
     } catch (err: unknown) {
       triggerNotification(err instanceof Error ? err.message : "Error al registrar pago", "warning");
     }
@@ -1682,7 +1718,7 @@ function GoalDetailModal({ goal, goals, onClose, onRequestComplete, addStepToGoa
     }
     try {
       await addPotContribution(liveGoal.id, amount);
-      triggerNotification("Aporte añadido · +5 puntos", "success");
+      triggerNotification("Aporte añadido · +5 koins", "success");
       setContributionVisible(false);
       setContributionAmount("");
     } catch (err: unknown) {
@@ -1823,7 +1859,7 @@ function GoalDetailModal({ goal, goals, onClose, onRequestComplete, addStepToGoa
                 return;
               }
               if (inst?.missed) {
-                triggerNotification("Este periodo venció: su aporte ya se repartió entre los restantes.", "info");
+                triggerNotification(isPot ? "Este periodo venció: su aporte ya se repartió entre los restantes." : "Este pago venció: su monto ya se repartió entre los restantes.", "info");
                 return;
               }
               setPendingAction({
@@ -1834,7 +1870,7 @@ function GoalDetailModal({ goal, goals, onClose, onRequestComplete, addStepToGoa
                 onToggle: () => {
                   setPendingAction(null);
                   if (inst) markInstallmentById(inst.id, liveGoal.id).then(() => {
-                    triggerNotification(isPot ? "Aporte registrado · +5 puntos" : "Pago registrado · +5 puntos", "success");
+                    triggerNotification(isPot ? "Aporte registrado · +5 koins" : "Pago registrado · +5 koins", "success");
                   }).catch((err: unknown) => {
                     triggerNotification(err instanceof Error ? err.message : "Error", "warning");
                   });
@@ -1849,8 +1885,20 @@ function GoalDetailModal({ goal, goals, onClose, onRequestComplete, addStepToGoa
             tutorialTargetKey={tutorialTargetKey}
             onTutorialTargetResolved={handleTutorialTargetResolved}
             tutorialExternalKeys={potFree && !isCompleted && !isIncomplete ? ["add"] : undefined}
+            tutorialWaitKeys={
+              potFree && (liveGoal.contributions ?? []).length === 0
+                ? ["savings"]
+                : !isSavings && !isPot && steps.length === 0
+                  ? ["step"]
+                  : undefined
+            }
             colors={colors}
             styles={styles}
+            autoCompleteHint={
+              liveGoal.type === "payment"
+                ? "Se completa al terminar todos los pagos"
+                : undefined
+            }
             savings={isSavings && !isFreeSavings ? {
               installments: liveGoal.installments ?? 0,
               interval: liveGoal.interval ?? "monthly",
@@ -1957,7 +2005,7 @@ function GoalDetailModal({ goal, goals, onClose, onRequestComplete, addStepToGoa
                     try {
                       await markInstallmentById(editInstallment.id, liveGoal.id);
                       setEditInstallment(null);
-                      triggerNotification("Pago registrado · +5 puntos", "success");
+                      triggerNotification("Pago registrado · +5 koins", "success");
                     } catch (err: unknown) {
                       triggerNotification(err instanceof Error ? err.message : "Error al registrar pago", "warning");
                     }
@@ -1985,7 +2033,7 @@ function GoalDetailModal({ goal, goals, onClose, onRequestComplete, addStepToGoa
           activeOpacity={1}
           onPress={() => setPendingAction(null)}
         >
-          <TouchableOpacity activeOpacity={1} style={{ backgroundColor: colors.surface, borderTopLeftRadius: 20, borderTopRightRadius: 20, borderWidth: 1, borderColor: colors.border, borderBottomWidth: 0, paddingHorizontal: 20, paddingTop: 20, paddingBottom: Platform.OS === "ios" ? 40 : 24 }}>
+          <TouchableOpacity activeOpacity={1} style={{ backgroundColor: colors.background, borderTopLeftRadius: 20, borderTopRightRadius: 20, borderWidth: 1, borderColor: colors.border, borderBottomWidth: 0, paddingHorizontal: 20, paddingTop: 20, paddingBottom: (Platform.OS === "ios" ? 40 : 24) + bottomPad }}>
             {pendingAction && (
               <>
                 <View style={{ alignItems: "center", marginBottom: 20 }}>
@@ -2067,12 +2115,13 @@ function GoalDetailModal({ goal, goals, onClose, onRequestComplete, addStepToGoa
 
       {/* Tutorial de uso: spotlight + tarjeta inferir, avanza por pasos */}
       <TutorialOverlay
-        visible={tutorialVisible && tutorialReady}
+        visible={tutorialVisible}
         index={tutorialIndex}
         steps={tutorialSteps}
         rectForKey={tutorialRectForKey}
         onAdvance={() => setTutorialIndex((i) => Math.min(i + 1, tutorialSteps.length - 1))}
         onFinish={() => setTutorialVisible(false)}
+        waiting={tutorialWaiting}
       />
     </Modal>
   );
@@ -2083,132 +2132,9 @@ function GoalDetailModal({ goal, goals, onClose, onRequestComplete, addStepToGoa
 function DetailBackground({ colors }: { colors: ThemeColors }) {
   return (
     <View style={[StyleSheet.absoluteFill, { backgroundColor: colors.background, overflow: "hidden" }]} pointerEvents="none">
-      {/* Diamante grande arriba a la derecha */}
-      <View
-        style={{
-          position: "absolute",
-          top: -60,
-          right: -40,
-          width: 180,
-          height: 180,
-          backgroundColor: colors.primary,
-          opacity: 0.08,
-          transform: [{ rotate: "45deg" }],
-        }}
-      />
-      {/* Círculo con borde abajo a la izquierda */}
-      <View
-        style={{
-          position: "absolute",
-          bottom: -50,
-          left: -50,
-          width: 200,
-          height: 200,
-          borderRadius: 100,
-          borderWidth: 3,
-          borderColor: colors.accentBlue,
-          opacity: 0.12,
-        }}
-      />
-      {/* Triángulo esquinado arriba a la izquierda */}
-      <View
-        style={{
-          position: "absolute",
-          top: 80,
-          left: -30,
-          width: 0,
-          height: 0,
-          borderLeftWidth: 80,
-          borderRightWidth: 80,
-          borderBottomWidth: 140,
-          borderLeftColor: "transparent",
-          borderRightColor: "transparent",
-          borderBottomColor: colors.success,
-          opacity: 0.07,
-          transform: [{ rotate: "-15deg" }],
-        }}
-      />
-      {/* Círculo pequeño a la derecha */}
-      <View
-        style={{
-          position: "absolute",
-          bottom: 160,
-          right: 30,
-          width: 40,
-          height: 40,
-          borderRadius: 20,
-          backgroundColor: colors.warning,
-          opacity: 0.1,
-      }}
-      />
-      {/* Hexágono simulado abajo */}
-      <View
-        style={{
-          position: "absolute",
-          bottom: 40,
-          right: "35%",
-          width: 100,
-          height: 100,
-          borderRadius: 16,
-          backgroundColor: colors.error,
-          opacity: 0.06,
-          transform: [{ rotate: "30deg" }],
-        }}
-      />
-      {/* Anillos concéntricos en el centro-izquierda */}
-      <View
-        style={{
-          position: "absolute",
-          top: 280,
-          left: 50,
-          width: 80,
-          height: 80,
-          borderRadius: 40,
-          borderWidth: 2,
-          borderColor: colors.primary,
-          opacity: 0.09,
-        }}
-      />
-      <View
-        style={{
-          position: "absolute",
-          top: 288,
-          left: 58,
-          width: 64,
-          height: 64,
-          borderRadius: 32,
-          borderWidth: 1.5,
-          borderColor: colors.primary,
-          opacity: 0.06,
-        }}
-      />
-      {/* Rombo pequeño centrado-derecha */}
-      <View
-        style={{
-          position: "absolute",
-          top: 440,
-          left: 240,
-          width: 50,
-          height: 50,
-          backgroundColor: colors.accentBlue,
-          opacity: 0.07,
-          transform: [{ rotate: "15deg" }],
-        }}
-      />
-      {/* Línea decorativa en el centro */}
-      <View
-        style={{
-          position: "absolute",
-          top: 180,
-          left: 290,
-          width: 2,
-          height: 120,
-          borderRadius: 1,
-          backgroundColor: colors.success,
-          opacity: 0.08,
-          transform: [{ rotate: "25deg" }],
-        }}
-      />
+      {/* El fondo usa las figuras que el usuario tenga seleccionadas en la
+          tienda (con su movimiento), igual que en el resto de la app. */}
+      <BackgroundDecor colors={colors} />
     </View>
   );
 }
@@ -2260,10 +2186,15 @@ type CanvasProps = {
   // aporte de la alcancía libre, que vive en la barra superior): el canvas
   // no reportará "no existe" por ellas, las resuelve el padre.
   tutorialExternalKeys?: string[];
+  // Claves de pills que aún no existen (meta vacía): el canvas espera a que
+  // el usuario cree la primera pill con el + en vez de saltar el paso.
+  tutorialWaitKeys?: string[];
   colors: ThemeColors;
   styles: ReturnType<typeof getStyles>;
   savings?: SavingsConfig;
   pot?: PotCanvasConfig;
+  // Texto del hint de auto-completado del GoalPill (ahorro vs pago).
+  autoCompleteHint?: string;
 };
 
 type PlacedNode = {
@@ -2295,10 +2226,12 @@ function MindMapCanvas(props: CanvasProps) {
     tutorialTargetKey,
     onTutorialTargetResolved,
     tutorialExternalKeys,
+    tutorialWaitKeys,
     colors,
     styles,
     savings,
     pot,
+    autoCompleteHint,
   } = props;
 
   const [size, setSize] = useState({ w: 0, h: 0 });
@@ -2306,6 +2239,17 @@ function MindMapCanvas(props: CanvasProps) {
   // Marco del canvas en ventana: se mide junto con las pills para derivar
   // su posición dentro del contenido (el ScrollView no expone measureInWindow).
   const canvasRef = React.useRef<View>(null);
+
+  // Tamaños reales de las tarjetas (por id): el midpoint de los "+" se calcula
+  // sobre el tramo visible del trazo entre bordes, que depende de estas medidas.
+  const [nodeSizes, setNodeSizes] = useState<Record<string, NodeSize>>({});
+  const nodeSizesRef = React.useRef<Record<string, NodeSize>>({});
+  const handleNodeSize = useCallback((id: string, w: number, h: number) => {
+    const prev = nodeSizesRef.current[id];
+    if (prev && Math.abs(prev.w - w) < 0.5 && Math.abs(prev.h - h) < 0.5) return;
+    nodeSizesRef.current[id] = { w, h };
+    setNodeSizes({ ...nodeSizesRef.current });
+  }, []);
 
   // Referencias a cada pill (por clave de tutorial) para medirlas a demanda.
   const pillRefs = React.useRef<Map<string, View>>(new Map());
@@ -2390,6 +2334,13 @@ function MindMapCanvas(props: CanvasProps) {
         // La pill aún no montó/registró su ref: reintentar un momento antes
         // de declarar que no existe (p. ej. "+" en una meta sin pasos).
         if (tries > 6) {
+          // Las pills de una meta vacía aún no existen: si el paso las espera
+          // (tutorialWaitKeys), seguir reintentando hasta que el usuario cree
+          // la primera con el + en vez de saltar el paso.
+          if (tutorialWaitKeys?.includes(key)) {
+            setTimeout(attempt, 300);
+            return;
+          }
           // Los objetivos externos al canvas los resuelve el padre (WindowBox);
           // si no se reportan aquí como inexistentes, el tutorial no salta el paso.
           if (!tutorialExternalKeys?.includes(key)) {
@@ -2406,6 +2357,10 @@ function MindMapCanvas(props: CanvasProps) {
           if (cancelled) return;
           if (pw <= 0 || ph <= 0) {
             if (tries > 6) {
+              if (tutorialWaitKeys?.includes(key)) {
+                setTimeout(attempt, 300);
+                return;
+              }
               onTutorialTargetResolved?.(key, null);
             } else {
               setTimeout(attempt, 150);
@@ -2428,7 +2383,7 @@ function MindMapCanvas(props: CanvasProps) {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [tutorialTargetKey, size.h, contentHeight, onTutorialTargetResolved]);
+  }, [tutorialTargetKey, size.h, contentHeight, onTutorialTargetResolved, tutorialWaitKeys]);
 
   const nodes: PlacedNode[] = useMemo(
     () => isPot
@@ -2441,18 +2396,23 @@ function MindMapCanvas(props: CanvasProps) {
     [size.w, contentHeight, steps, isSavings, isPot, potFree, pot?.installments, pot?.completedInstallments, pot?.contributionList, savings?.installments, savings?.completedInstallments]
   );
 
-  const connectors = useMemo(() => buildConnectors(nodes, colors), [nodes, colors]);
+  const connectors = useMemo(() => buildConnectors(nodes, colors, nodeSizes), [nodes, colors, nodeSizes]);
   // El "+" de añadir aporte ya no vive en el canvas: para ahorro/alcancía
   // está en la barra superior del detalle y los aportes son las propias pills.
   const addButtons = useMemo(
-    () => (isPot || isSavings) ? [] : buildAddButtons(nodes),
-    [isPot, isSavings, nodes]
+    () => (isPot || isSavings) ? [] : buildAddButtons(nodes, nodeSizes),
+    [isPot, isSavings, nodes, nodeSizes]
   );
 
-  // Calcular fecha de cada pago según intervalo (ahorro o alcancía por periodos)
+  // Calcular fecha de cada pago según intervalo (ahorro o alcancía por periodos).
+  // Si la cuota ya tiene fecha guardada (fue editada), se muestra esa.
   const schedule = savings ?? (isPot && !potFree ? pot : undefined);
   const getPaymentDate = useCallback((index: number): string => {
     if (!schedule) return "";
+    const stored = schedule.installmentList?.[index]?.dueDate;
+    if (stored && !isNaN(new Date(stored).getTime())) {
+      return new Date(stored).toLocaleDateString("es", { day: "numeric", month: "short" });
+    }
     const start = new Date(schedule.createdAt);
     const days = schedule.interval === "weekly" ? 7 : 30;
     const due = new Date(start.getTime() + (index + 1) * days * 86400000);
@@ -2518,6 +2478,7 @@ function MindMapCanvas(props: CanvasProps) {
               key={n.id}
               x={n.x}
               y={n.y}
+              onSize={(w, h) => handleNodeSize(n.id, w, h)}
               registerRef={registerPillRef(
                 n.kind === "goal" ? "goal" : n.kind === "start" ? "start" : n.kind === "savings" ? "savings" : "step"
               )}
@@ -2573,6 +2534,7 @@ function MindMapCanvas(props: CanvasProps) {
                   canFinalize={canFinalize && !isCompleted}
                   onTap={onGoalTap}
                   autoComplete={isSavings || isPot}
+                  autoCompleteHint={autoCompleteHint}
                   colors={colors}
                   styles={styles}
                 />
@@ -2605,7 +2567,7 @@ function computeNodeLayout(
   if (width <= 0 || height <= 0) return [];
 
   const cx = width / 2;
-  const topY = 36;
+  const topY = 72;
   const bottomY = height - 40;
   const usableH = Math.max(0, bottomY - topY);
 
@@ -2662,7 +2624,7 @@ function computeSavingsNodeLayout(
   if (width <= 0 || height <= 0 || installments < 1) return [];
 
   const cx = width / 2;
-  const topY = 36;
+  const topY = 72;
   const bottomY = height - 40;
   const usableH = Math.max(0, bottomY - topY);
   const STEP_HALF = 117;
@@ -2703,7 +2665,7 @@ function computePotFreeLayout(
   if (width <= 0 || height <= 0) return [];
 
   const cx = width / 2;
-  const topY = 36;
+  const topY = 72;
   const bottomY = height - 40;
   const usableH = Math.max(0, bottomY - topY);
   const STEP_HALF = 117;
@@ -2748,7 +2710,7 @@ function computePotPeriods(targetDate: string, interval: "weekly" | "monthly"): 
 
 type Connector = { d: string; color: string; opacity: number };
 
-function buildConnectors(nodes: PlacedNode[], colors: ThemeColors): Connector[] {
+function buildConnectors(nodes: PlacedNode[], colors: ThemeColors, sizes: Record<string, NodeSize>): Connector[] {
   const out: Connector[] = [];
   for (let i = 0; i < nodes.length - 1; i += 1) {
     const a = nodes[i];
@@ -2756,7 +2718,7 @@ function buildConnectors(nodes: PlacedNode[], colors: ThemeColors): Connector[] 
     const nextStep = b.kind === "step" ? b.step : undefined;
     const isCompletedFlow = nextStep?.completed ?? (b.kind === "savings" ? b.completed : false);
     out.push({
-      d: getCurvePath(a, b, i),
+      d: getCurvePath(a, b, sizes[a.id], sizes[b.id]),
       color: isCompletedFlow ? colors.success : colors.textSecondary,
       // El primer trazo sale de la meta: ligeramente más suave para dar
       // jerarquía visual. El resto va a 0.55.
@@ -2768,12 +2730,14 @@ function buildConnectors(nodes: PlacedNode[], colors: ThemeColors): Connector[] 
 
 type AddButton = { id: string; x: number; y: number; afterNodeIndex: number };
 
-function buildAddButtons(nodes: PlacedNode[]): AddButton[] {
+type NodeSize = { w: number; h: number };
+
+function buildAddButtons(nodes: PlacedNode[], sizes: Record<string, NodeSize>): AddButton[] {
   const out: AddButton[] = [];
   for (let i = 0; i < nodes.length - 1; i += 1) {
     const a = nodes[i];
     const b = nodes[i + 1];
-    const mid = midpoint(a, b, i);
+    const mid = visibleMidpoint(a, b, sizes[a.id], sizes[b.id]);
     out.push({
       id: `add-${i}`,
       x: mid.x,
@@ -2784,47 +2748,131 @@ function buildAddButtons(nodes: PlacedNode[]): AddButton[] {
   return out;
 }
 
-// Calcula el punto medio de la curva Bezier entre dos nodos, usado para
-// posicionar los botones "+" en los gaps. Usa la formula del centroide
-// de una curva cubica en t=0.5: (P0 + 3*P1 + 3*P2 + P3) / 8.
-function midpoint(a: PlacedNode, b: PlacedNode, idx: number) {
-  const dx = b.x - a.x;
-  const dy = b.y - a.y;
-  const len = Math.sqrt(dx * dx + dy * dy);
-  if (len === 0) return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
-  const cp = curveCP(a, dx, dy, len, idx);
-  const mx = (a.x + 3 * cp.cpx1 + 3 * cp.cpx2 + b.x) / 8;
-  const my = (a.y + 3 * cp.cpy1 + 3 * cp.cpy2 + b.y) / 8;
-  return { x: mx, y: my };
-}
+// Muestreo de la curva cúbica: cuantos más puntos, más exacto el midpoint.
+const CURVE_SAMPLES = 28;
 
-function getCurvePath(a: PlacedNode, b: PlacedNode, idx: number): string {
-  const dx = b.x - a.x;
-  const dy = b.y - a.y;
-  const len = Math.sqrt(dx * dx + dy * dy);
-  if (len === 0) return `M ${a.x} ${a.y} L ${b.x} ${b.y}`;
-  const cp = curveCP(a, dx, dy, len, idx);
-  return `M ${a.x} ${a.y} C ${cp.cpx1} ${cp.cpy1} ${cp.cpx2} ${cp.cpy2} ${b.x} ${b.y}`;
-}
+// Geometría compartida entre el trazo dibujado y el midpoint de los "+" para
+// que ambos sigan exactamente la misma línea: tramo recto vertical que sale
+// del centro de A (LEAD px fuera de su borde), Bézier en S con tangente
+// vertical en ambos extremos (sale recta, barre hacia la otra tarjeta y entra
+// recta) y tramo recto final hacia el centro de B.
+type ConnectorGeom = {
+  start: { x: number; y: number };
+  leadA: { x: number; y: number };
+  cp1: { x: number; y: number };
+  cp2: { x: number; y: number };
+  leadB: { x: number; y: number };
+  end: { x: number; y: number };
+};
 
-// Calcula puntos de control para curvas cubicas Bezier con curvatura
-// perpendicular alternante (el signo de idx%2 inverte la direccion).
-// Esto crea un flujo organico tipo mapa mental donde las curvas se
-// abren hacia izquierda o derecha alternadamente, evitando que se
-// superpongan visualmente. El parametro idx determina el sentido
-// de la curvatura para cada par de nodos consecutivos.
-function curveCP(
-  a: PlacedNode, dx: number, dy: number, len: number, idx: number
-) {
-  const scale = Math.min(48, len * 0.16) * (idx % 2 === 0 ? 1 : -1);
-  const perpX = -dy / len * scale;
-  const perpY = dx / len * scale;
+const LEAD = 5;
+
+// Altura estimada de una tarjeta sin medir (primer render): se corrige apenas
+// llegan los onSize de los nodos.
+const FALLBACK_HALF_H = 16;
+
+function connectorGeom(
+  a: PlacedNode,
+  b: PlacedNode,
+  sizeA?: NodeSize,
+  sizeB?: NodeSize
+): ConnectorGeom {
+  const halfA = sizeA ? sizeA.h / 2 : FALLBACK_HALF_H;
+  const halfB = sizeB ? sizeB.h / 2 : FALLBACK_HALF_H;
+  // Si las tarjetas están tan juntas que los tramos rectos se cruzarían,
+  // se encogen hasta el espacio disponible (borde a borde).
+  const gap = b.y - halfB - a.y - halfA;
+  const lead = Math.min(LEAD, Math.max(0, gap) / 2);
+  const leadA = { x: a.x, y: a.y + halfA + lead };
+  const leadB = { x: b.x, y: b.y - halfB - lead };
+  // k = cuánto conserva la tangente vertical antes de girar: dominado por la
+  // separación horizontal (zigzag) para que la S se note incluso cuando las
+  // tarjetas están cerca verticalmente.
+  const dz = Math.abs(b.x - a.x);
+  const dy = Math.max(0, leadB.y - leadA.y);
+  const k = clamp(Math.max(dz * 0.5, dy * 0.25), 10, 80);
   return {
-    cpx1: a.x + dx * 0.3 + perpX,
-    cpy1: a.y + dy * 0.3 + perpY,
-    cpx2: a.x + dx * 0.7 + perpX,
-    cpy2: a.y + dy * 0.7 + perpY,
+    start: { x: a.x, y: a.y },
+    leadA,
+    cp1: { x: leadA.x, y: leadA.y + k },
+    cp2: { x: leadB.x, y: leadB.y - k },
+    leadB,
+    end: { x: b.x, y: b.y },
   };
+}
+
+function curvePointGeom(g: ConnectorGeom, t: number) {
+  const u = 1 - t;
+  return {
+    x: u * u * u * g.leadA.x + 3 * u * u * t * g.cp1.x + 3 * u * t * t * g.cp2.x + t * t * t * g.leadB.x,
+    y: u * u * u * g.leadA.y + 3 * u * u * t * g.cp1.y + 3 * u * t * t * g.cp2.y + t * t * t * g.leadB.y,
+  };
+}
+
+// Punto medio exacto de la porción visible del trazo entre dos tarjetas. No
+// usa t=0.5 del Bézier (que se desvía de la mitad real cuando la curva es
+// asimétrica): muestrea el trazo completo (rectos + curva), recorta el tramo
+// que queda entre los bordes de ambas tarjetas y toma la mitad por longitud
+// de arco. Si las tarjetas aún no se midieron, cae al midpoint del trazo
+// completo.
+function visibleMidpoint(
+  a: PlacedNode,
+  b: PlacedNode,
+  sizeA?: NodeSize,
+  sizeB?: NodeSize
+): { x: number; y: number } {
+  const g = connectorGeom(a, b, sizeA, sizeB);
+
+  const pts: { x: number; y: number }[] = [g.start, g.leadA];
+  for (let i = 0; i <= CURVE_SAMPLES; i += 1) {
+    pts.push(curvePointGeom(g, i / CURVE_SAMPLES));
+  }
+  pts.push(g.leadB, g.end);
+
+  // Con ambas tarjetas medidas se acota al tramo visible: desde que el trazo
+  // sale del borde de A hasta que entra en el de B. Sin medidas (primer
+  // render) se usa el trazo completo.
+  let from = 0;
+  let to = pts.length - 1;
+  if (sizeA && sizeB) {
+    const out = pts.findIndex((p) => Math.abs(p.x - a.x) > sizeA.w / 2 || Math.abs(p.y - a.y) > sizeA.h / 2);
+    let inn = -1;
+    for (let i = pts.length - 1; i >= 0; i -= 1) {
+      if (Math.abs(pts[i].x - b.x) > sizeB.w / 2 || Math.abs(pts[i].y - b.y) > sizeB.h / 2) {
+        inn = i;
+        break;
+      }
+    }
+    if (out >= 0 && inn >= 0 && out < inn) {
+      from = out;
+      to = inn;
+    }
+  }
+
+  // Longitud acumulada del tramo y punto en su mitad (interpolado).
+  let total = 0;
+  for (let i = from + 1; i <= to; i += 1) {
+    total += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
+  }
+  let acc = 0;
+  for (let i = from + 1; i <= to; i += 1) {
+    const seg = Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
+    if (acc + seg >= total / 2 || i === to) {
+      const k = total / 2 - acc;
+      const f = seg > 0 ? k / seg : 0;
+      return {
+        x: pts[i - 1].x + (pts[i].x - pts[i - 1].x) * f,
+        y: pts[i - 1].y + (pts[i].y - pts[i - 1].y) * f,
+      };
+    }
+    acc += seg;
+  }
+  return { x: (pts[from].x + pts[to].x) / 2, y: (pts[from].y + pts[to].y) / 2 };
+}
+
+function getCurvePath(a: PlacedNode, b: PlacedNode, sizeA?: NodeSize, sizeB?: NodeSize): string {
+  const g = connectorGeom(a, b, sizeA, sizeB);
+  return `M ${g.start.x} ${g.start.y} L ${g.leadA.x} ${g.leadA.y} C ${g.cp1.x} ${g.cp1.y} ${g.cp2.x} ${g.cp2.y} ${g.leadB.x} ${g.leadB.y} L ${g.end.x} ${g.end.y}`;
 }
 
 function clamp(n: number, min: number, max: number): number {
@@ -2839,11 +2887,13 @@ function PositionedNode({
   x,
   y,
   registerRef,
+  onSize,
   children,
 }: {
   x: number;
   y: number;
   registerRef?: (node: View | null) => void;
+  onSize?: (w: number, h: number) => void;
   children: React.ReactNode;
 }) {
   const [size, setSize] = useState({ w: 0, h: 0 });
@@ -2855,6 +2905,7 @@ function PositionedNode({
         if (width !== size.w || height !== size.h) {
           setSize({ w: width, h: height });
         }
+        onSize?.(width, height);
       }}
       style={{
         position: "absolute",
@@ -3064,6 +3115,7 @@ function GoalPill({
   canFinalize,
   onTap,
   autoComplete,
+  autoCompleteHint = "Se completa al terminar todo el ahorro",
   colors,
   styles,
 }: {
@@ -3074,6 +3126,8 @@ function GoalPill({
   onTap: () => void;
   // Las metas de ahorro se completan solas al terminar todo el ahorro.
   autoComplete?: boolean;
+  // Texto del hint de auto-completado (ahorro vs pago).
+  autoCompleteHint?: string;
   colors: ThemeColors;
   styles: ReturnType<typeof getStyles>;
 }) {
@@ -3112,10 +3166,10 @@ function GoalPill({
           {isCompleted
             ? "Completada"
             : autoComplete
-              ? "Se completa al terminar todo el ahorro"
-              : canFinalize
-                ? "Toca para finalizar"
-                : "Bloqueada"}
+            ? autoCompleteHint
+            : canFinalize
+              ? "Toca para finalizar"
+              : "Bloqueada"}
         </AppText>
       </View>
     </TouchableOpacity>
@@ -3169,7 +3223,8 @@ function AddStepModal({
   onCancel: () => void;
 }) {
   const colors = useTheme();
-  const styles = getStyles(colors);
+  const bottomPad = useSafeBottom();
+  const styles = getStyles(colors, bottomPad);
 
   return (
     <Modal
@@ -3248,7 +3303,8 @@ function AddContributionModal({
   onCancel: () => void;
 }) {
   const colors = useTheme();
-  const styles = getStyles(colors);
+  const bottomPad = useSafeBottom();
+  const styles = getStyles(colors, bottomPad);
 
   return (
     <Modal
@@ -3305,7 +3361,20 @@ function AddContributionModal({
 
 // Campo de fecha con calendario: al tocar se abre el mismo selector mensual
 // de la vista de balances y al elegir un día se cierra y fija la fecha (YYYY-MM-DD).
-function DateField({ label, date, onChange }: { label: string; date: string; onChange: (d: string) => void }) {
+// Con optional=true se permite dejar la meta sin fecha límite.
+function DateField({
+  label,
+  date,
+  onChange,
+  minDate,
+  optional,
+}: {
+  label: string;
+  date: string;
+  onChange: (d: string) => void;
+  minDate?: Date;
+  optional?: boolean;
+}) {
   const colors = useTheme();
   const styles = getStyles(colors);
   const [open, setOpen] = useState(false);
@@ -3314,19 +3383,38 @@ function DateField({ label, date, onChange }: { label: string; date: string; onC
   return (
     <>
       <AppText style={styles.label}>{label}</AppText>
-      <TouchableOpacity
-        style={styles.dateFieldBtn}
-        activeOpacity={0.7}
-        onPress={() => setOpen((o) => !o)}
-      >
-        <Ionicons name="calendar-outline" size={16} color={colors.primary} />
-        <AppText style={date ? styles.dateFieldText : styles.dateFieldPlaceholder}>
-          {date
-            ? new Date(`${date}T12:00:00`).toLocaleDateString("es", { day: "numeric", month: "long", year: "numeric" })
-            : "Poner fecha"}
-        </AppText>
-        <Ionicons name={open ? "chevron-up" : "chevron-down"} size={14} color={colors.textSecondary} />
-      </TouchableOpacity>
+      <View style={{ flexDirection: "row", gap: 8, alignItems: "center" }}>
+        <TouchableOpacity
+          style={[styles.dateFieldBtn, { flex: 1 }]}
+          activeOpacity={0.7}
+          onPress={() => setOpen((o) => !o)}
+        >
+          <Ionicons name="calendar-outline" size={16} color={colors.primary} />
+          <AppText style={date ? styles.dateFieldText : styles.dateFieldPlaceholder}>
+            {date
+              ? new Date(`${date}T12:00:00`).toLocaleDateString("es", { day: "numeric", month: "long", year: "numeric" })
+              : optional
+              ? "Sin fecha"
+              : "Poner fecha"}
+          </AppText>
+          <Ionicons name={open ? "chevron-up" : "chevron-down"} size={14} color={colors.textSecondary} />
+        </TouchableOpacity>
+        {optional && date ? (
+          <TouchableOpacity
+            activeOpacity={0.7}
+            onPress={() => onChange("")}
+            style={{
+              borderWidth: 1,
+              borderColor: colors.border,
+              borderRadius: 10,
+              padding: 10,
+              backgroundColor: colors.background,
+            }}
+          >
+            <Ionicons name="close" size={16} color={colors.textSecondary} />
+          </TouchableOpacity>
+        ) : null}
+      </View>
       {open && (
         <CalendarPicker
           selected={selected}
@@ -3336,6 +3424,7 @@ function DateField({ label, date, onChange }: { label: string; date: string; onC
             setOpen(false);
           }}
           allowFuture
+          minDate={minDate}
         />
       )}
     </>
@@ -3589,6 +3678,7 @@ function TutorialOverlay({
   rectForKey,
   onAdvance,
   onFinish,
+  waiting,
 }: {
   visible: boolean;
   index: number;
@@ -3596,6 +3686,9 @@ function TutorialOverlay({
   rectForKey: (key: string) => Rect | null;
   onAdvance: () => void;
   onFinish: () => void;
+  // Paso sin spotlight: la pill aún no existe (meta vacía) y se espera a que
+  // el usuario cree la primera; se muestra la tarjeta sin bloquear el +.
+  waiting?: boolean;
 }) {
   const colors = useTheme();
   const { width: screenW, height: screenH } = useWindowDimensions();
@@ -3603,70 +3696,170 @@ function TutorialOverlay({
   const [cardH, setCardH] = useState(0);
 
   // El padre ya salta los pasos que no tienen elemento; aquí solo se toma el
-  // paso indicado. Si el rect aún no llegó (el canvas está midiendo) se espera
-  // sin cerrar: cerrar aquí rompería el avance entre pasos consecutivos.
+  // paso indicado. Si el rect aún no llegó (el canvas está midiendo) se usa el
+  // del paso anterior como ancla: así el hueco no desaparece de golpe entre
+  // pasos consecutivos y se desliza hacia el nuevo objetivo cuando llega.
   const step = visible ? steps[index] : undefined;
-  const rect = step ? rectForKey(step.key) : null;
+  const prevStep = !step || index === 0 ? undefined : steps[index - 1];
+  const rect = step ? (rectForKey(step.key) ?? (prevStep ? rectForKey(prevStep.key) : null)) : null;
+
+  // La tarjeta es un paso "rezagado": muestra el paso anterior hasta que el
+  // hueco aterrice en el nuevo objetivo (completion de la animación). Así el
+  // contenido no cambia antes de que el spotlight se mueva. Al abrir el
+  // tutorial se sincroniza de inmediato.
+  const [cardIndex, setCardIndex] = useState(index);
+  React.useEffect(() => {
+    if (visible) setCardIndex(index);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible]);
+  const cardStep = steps[cardIndex] ?? step;
+  const cardResolved = step ? !!rectForKey(step.key) : false;
+  const targetIndexRef = React.useRef(index);
 
   // Red de seguridad: solo cierra si el índice quedó fuera del rango de pasos.
   React.useEffect(() => {
     if (visible && !step) onFinish();
   }, [visible, step, onFinish]);
 
-  if (!visible || !step || !rect) return null;
+  // Paso en espera (meta vacía): el hueco se queda anclado al rect anterior y
+  // la tarjeta cambia ya (no hay movimiento que esperar).
+  React.useEffect(() => {
+    if (visible && waiting && cardIndex !== index) setCardIndex(index);
+  }, [visible, waiting, index, cardIndex]);
 
-  const isLast = index === steps.length - 1;
+  const isLast = cardIndex === steps.length - 1;
   const dim = "rgba(0,0,0,0.6)";
-  const { x, y, w, h } = rect;
-  const holes: ViewStyle[] = [
-    // Arriba del objetivo
-    { left: 0, top: 0, width: screenW, height: Math.max(0, y) },
-    // Abajo del objetivo
-    { left: 0, top: y + h, width: screenW, height: Math.max(0, screenH - y - h) },
-    // Izquierda
-    { left: 0, top: y, width: Math.max(0, x), height: h },
-    // Derecha
-    { left: x + w, top: y, width: Math.max(0, screenW - x - w), height: h },
-  ];
+  // Aire alrededor del objetivo: el hueco y el marco son un poco más grandes
+  // que la tarjeta medida para que el foco no quede pegado a sus bordes.
+  const PAD = 10;
+  const R = 18;
+  // Hooks incondicionales (orden estable aunque el rect aún no exista).
+  const hasRectNow = !!rect;
+  const padRect = hasRectNow
+    ? {
+        sx: Math.max(0, rect.x - PAD),
+        sy: Math.max(0, rect.y - PAD),
+        sw: Math.min(screenW - Math.max(0, rect.x - PAD), rect.w + PAD * 2),
+        sh: Math.min(screenH - Math.max(0, rect.y - PAD), rect.h + PAD * 2),
+      }
+    : { sx: 0, sy: 0, sw: 0, sh: 0 };
+
+  // Transición fluida: cuando el objetivo cambia se anima la posición del
+  // hueco (path SVG) y del marco mediante un listener que interpola frame a
+  // frame entre el rect anterior y el nuevo.
+  const anim = React.useRef(new Animated.Value(0)).current;
+  const fromRef = React.useRef(padRect);
+  const toRef = React.useRef(padRect);
+  const frameRef = React.useRef(padRect);
+  const hasRectRef = React.useRef(false);
+  const [frame, setFrame] = React.useState(padRect);
+
+  React.useEffect(() => {
+    // Sin rect todavía (el canvas está midiendo el nuevo objetivo): se
+    // conserva el último frame para no animar hacia la esquina (0,0).
+    if (!hasRectNow) return;
+    const next = padRect;
+    // Primer rect (o reaparición tras un paso sin target): colocación
+    // directa, sin animar desde el dummy (0,0).
+    if (!hasRectRef.current) {
+      hasRectRef.current = true;
+      frameRef.current = next;
+      setFrame(next);
+      if (cardResolved) setCardIndex(index);
+      return;
+    }
+    const prev = frameRef.current;
+    if (Math.abs(next.sx - prev.sx) < 0.5 && Math.abs(next.sy - prev.sy) < 0.5 &&
+        Math.abs(next.sw - prev.sw) < 0.5 && Math.abs(next.sh - prev.sh) < 0.5) {
+      setFrame(next);
+      // Sin movimiento: solo cambia el contenido si el objetivo propio ya
+      // está medido (si no, es el ancla del paso anterior en transición).
+      if (cardResolved) setCardIndex(index);
+      return;
+    }
+    fromRef.current = prev;
+    toRef.current = next;
+    targetIndexRef.current = index;
+    anim.setValue(0);
+    Animated.timing(anim, { toValue: 1, duration: 280, useNativeDriver: false }).start(({ finished }) => {
+      // La tarjeta cambia cuando el hueco ya llegó al nuevo objetivo. Si la
+      // animación terminó contra el ancla porque el rect propio aún no se
+      // midió (clics rápidos), se espera a que llegue y reanime.
+      if (!finished) return;
+      const targetStep = steps[targetIndexRef.current];
+      if (!targetStep || !rectForKey(targetStep.key)) return;
+      setCardIndex(targetIndexRef.current);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasRectNow, padRect.sx, padRect.sy, padRect.sw, padRect.sh, index]);
+
+  React.useEffect(() => {
+    const id = anim.addListener(({ value }) => {
+      const p = fromRef.current;
+      const n = toRef.current;
+      const f = {
+        sx: p.sx + (n.sx - p.sx) * value,
+        sy: p.sy + (n.sy - p.sy) * value,
+        sw: p.sw + (n.sw - p.sw) * value,
+        sh: p.sh + (n.sh - p.sh) * value,
+      };
+      frameRef.current = f;
+      setFrame(f);
+    });
+    return () => anim.removeListener(id);
+  }, [anim]);
+
+  if (!visible || !step) return null;
+  if (!rect) return null;
+
+  const { sx, sy, sw, sh } = frame;
+  // Hueco redondeado: pantalla completa + rectángulo interior con radio
+  // (fillRule evenodd recorta el interior del oscurecido).
+  const holePath = `M0,0 H${screenW} V${screenH} H0 Z M${sx + R},${sy} H${sx + sw - R} A${R},${R} 0 0 1 ${sx + sw},${sy + R} V${sy + sh - R} A${R},${R} 0 0 1 ${sx + sw - R},${sy + sh} H${sx + R} A${R},${R} 0 0 1 ${sx},${sy + sh - R} V${sy + R} A${R},${R} 0 0 1 ${sx + R},${sy} Z`;
 
   // La tarjeta se coloca en el lado con más espacio libre (arriba o abajo del
   // spotlight) para no taparlo ni quedar cortada por los bordes de pantalla.
+  // Se usa el rect con aire (sy/sh) para que la tarjeta no invada el hueco.
   const GAP = 16;
   const cardHeight = cardH > 0 ? cardH : 200;
-  const spaceBelow = screenH - (y + h) - GAP;
-  const spaceAbove = y - GAP;
+  const spaceBelow = screenH - (sy + sh) - GAP;
+  const spaceAbove = sy - GAP;
   const placeOnBottom = spaceBelow >= spaceAbove;
   const cardTop = clamp(
-    placeOnBottom ? y + h + GAP : y - GAP - cardHeight,
+    placeOnBottom ? sy + sh + GAP : sy - GAP - cardHeight,
     GAP,
     Math.max(GAP, screenH - cardHeight - GAP)
   );
 
   return (
     <View style={[StyleSheet.absoluteFill, styles.overlay]}>
-      {holes.map((hole, i) => (
-        <View key={i} style={[StyleSheet.absoluteFill, { backgroundColor: dim }, hole]} pointerEvents="none" />
-      ))}
-      {/* Marco de resaltado alrededor del objetivo */}
+      {/* Oscurecido con hueco redondeado alrededor del objetivo (SVG) */}
+      <Svg style={StyleSheet.absoluteFill} pointerEvents="none" width={screenW} height={screenH}>
+        <Path d={holePath} fill={dim} fillRule="evenodd" />
+      </Svg>
+      {/* Marco de resaltado alrededor del hueco */}
       <View
         pointerEvents="none"
         style={{
           position: "absolute",
-          left: x - 4,
-          top: y - 4,
-          width: w + 8,
-          height: h + 8,
+          left: sx,
+          top: sy,
+          width: sw,
+          height: sh,
           borderWidth: 2,
           borderColor: colors.surface,
-          borderRadius: 16,
+          borderRadius: R,
         }}
       />
-      {/* Capturador de toques: avanzar al tocar cualquier parte */}
-      <TouchableOpacity
-        style={StyleSheet.absoluteFill}
-        activeOpacity={1}
-        onPress={onAdvance}
-      />
+      {/* Capturador de toques: avanzar al tocar cualquier parte. En espera se
+          omite para no bloquear el + que crea la primera pill. */}
+      {!waiting ? (
+        <TouchableOpacity
+          style={StyleSheet.absoluteFill}
+          activeOpacity={1}
+          onPress={onAdvance}
+        />
+      ) : null}
 
       {/* Tarjeta explicativa: se ubica abajo o arriba según el espacio libre */}
       <View
@@ -3677,13 +3870,13 @@ function TutorialOverlay({
         }}
       >
         <AppText style={styles.progress} disableHorizontalPadding>
-          Paso {index + 1} de {steps.length}
+          Paso {cardIndex + 1} de {steps.length}
         </AppText>
         <AppText style={styles.title} disableHorizontalPadding>
-          {step.title}
+          {cardStep.title}
         </AppText>
         <AppText style={styles.body} disableHorizontalPadding>
-          {step.body}
+          {cardStep.body}
         </AppText>
         <View style={styles.actionsRow}>
           <TouchableOpacity onPress={onFinish} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }} activeOpacity={0.7}>
@@ -3791,7 +3984,7 @@ function CompletionModal({
             camino recorrido: cada uno de los pasos intermedios que completaste
             te trajo hasta aquí, y eso merece celebrarse.
           </AppText>
-          <AppText style={styles.confirmReward}>+50 puntos</AppText>
+          <AppText style={styles.confirmReward}>+50 koins</AppText>
           <View style={styles.confirmActions}>
             <TouchableOpacity style={styles.confirmCancel} onPress={onCancel}>
               <AppText style={styles.confirmCancelText}>Cancelar</AppText>
@@ -3828,7 +4021,8 @@ function CompletedGoalDashboard({
   onClose: () => void;
 }) {
   const colors = useTheme();
-  const styles = getStyles(colors);
+  const bottomPad = useSafeBottom();
+  const styles = getStyles(colors, bottomPad);
 
   const completedAt = goal.completedAt || goal.createdAt;
   const totalMs =
@@ -3939,7 +4133,7 @@ function formatLongDate(iso: string): string {
 
 // ─── Estilos ─────────────────────────────────────────────────────────────────
 
-function getStyles(colors: ThemeColors) {
+function getStyles(colors: ThemeColors, bottomPad = 0) {
   return StyleSheet.create({
     container: {
       flex: 1,
@@ -3947,7 +4141,7 @@ function getStyles(colors: ThemeColors) {
     },
     content: {
       padding: 16,
-      paddingBottom: 32,
+      paddingBottom: 80 + bottomPad,
     },
 
     header: {
@@ -3963,23 +4157,6 @@ function getStyles(colors: ThemeColors) {
       fontWeight: "bold",
       color: colors.textPrimary,
     },
-    pointsBadge: {
-      flexDirection: "row",
-      alignItems: "center",
-      gap: 4,
-      backgroundColor: colors.surface,
-      borderWidth: 1,
-      borderColor: colors.border,
-      borderRadius: 20,
-      paddingVertical: 4,
-      paddingHorizontal: 10,
-    },
-    pointsText: {
-      fontSize: 13,
-      fontWeight: "600",
-      color: colors.textPrimary,
-    },
-
     errorBanner: {
       flexDirection: "row",
       justifyContent: "space-between",
@@ -4020,7 +4197,7 @@ function getStyles(colors: ThemeColors) {
     },
     floatingToolbar: {
       position: "absolute",
-      bottom: 28,
+      bottom: 28 + bottomPad,
       left: 0,
       right: 0,
       flexDirection: "row",
@@ -4131,7 +4308,7 @@ function getStyles(colors: ThemeColors) {
     fab: {
       position: "absolute",
       right: 20,
-      bottom: 20,
+      bottom: 20 + bottomPad,
       width: 56,
       height: 56,
       borderRadius: 28,
@@ -4142,14 +4319,13 @@ function getStyles(colors: ThemeColors) {
       borderColor: colors.border,
     },
 
-    // Modal crear
     modalOverlay: {
       flex: 1,
       backgroundColor: "rgba(0,0,0,0.5)",
       justifyContent: "flex-end",
     },
     modalView: {
-      backgroundColor: colors.surface,
+      backgroundColor: colors.background,
       borderTopLeftRadius: 20,
       borderTopRightRadius: 20,
       maxHeight: "90%",
@@ -4172,6 +4348,7 @@ function getStyles(colors: ThemeColors) {
     modalScroll: {
       padding: 16,
       gap: 8,
+      paddingBottom: 24 + bottomPad,
     },
     label: {
       fontSize: 11,
@@ -4213,7 +4390,6 @@ function getStyles(colors: ThemeColors) {
       color: colors.primary,
     },
 
-    // Campo de fecha (abre el calendario al tocar)
     dateFieldBtn: {
       flexDirection: "row",
       alignItems: "center",
@@ -4236,7 +4412,6 @@ function getStyles(colors: ThemeColors) {
       color: colors.textSecondary,
     },
 
-    // Grid 1x3 del selector de tipo de meta
     typeGrid: {
       flexDirection: "row",
       gap: 12,
@@ -4293,7 +4468,6 @@ function getStyles(colors: ThemeColors) {
       lineHeight: 18,
     },
 
-    // ─── Detalle / canvas ───
     detailContainer: {
       flex: 1,
     },
@@ -4328,7 +4502,6 @@ function getStyles(colors: ThemeColors) {
       position: "absolute",
     },
 
-    // Pills
     // `maxWidth` en vez de `width`: el contenedor se encoje al contenido
     // (flex) y solo se estira hasta el límite cuando el texto es largo.
     startPill: {
@@ -4452,7 +4625,6 @@ function getStyles(colors: ThemeColors) {
       marginTop: 2,
     },
 
-    // ─── Card flotante info paso ───
     stepInfoOverlay: {
       flex: 1,
       backgroundColor: "rgba(0,0,0,0.35)",
@@ -4463,7 +4635,7 @@ function getStyles(colors: ThemeColors) {
     stepInfoCard: {
       width: "100%",
       maxWidth: 380,
-      backgroundColor: colors.surface + "F2",
+      backgroundColor: colors.background + "F2",
       borderRadius: 24,
       borderWidth: 1,
       borderColor: colors.border + "80",
@@ -4574,14 +4746,14 @@ function getStyles(colors: ThemeColors) {
       borderWidth: 1.5,
     },
 
-    // ─── Modal crear paso ───
     stepModalView: {
-      backgroundColor: colors.surface,
+      backgroundColor: colors.background,
       margin: 24,
       borderRadius: 16,
       borderWidth: 1,
       borderColor: colors.border,
       padding: 20,
+      paddingBottom: 20 + bottomPad,
       gap: 8,
     },
     stepModalTitle: {
@@ -4611,7 +4783,6 @@ function getStyles(colors: ThemeColors) {
       fontWeight: "600",
     },
 
-    // ─── Modal confirmación / felicitación ───
     confirmOverlay: {
       flex: 1,
       backgroundColor: "rgba(0,0,0,0.55)",
@@ -4622,7 +4793,7 @@ function getStyles(colors: ThemeColors) {
     confirmCard: {
       width: "100%",
       maxWidth: 420,
-      backgroundColor: colors.surface,
+      backgroundColor: colors.background,
       borderRadius: 18,
       borderWidth: 1,
       borderColor: colors.border,
@@ -4691,11 +4862,10 @@ function getStyles(colors: ThemeColors) {
       fontWeight: "700",
     },
 
-    // ─── Dashboard meta completada ───
     dashboardContent: {
       padding: 24,
       paddingTop: Platform.OS === "ios" ? 58 : 44,
-      paddingBottom: 48,
+      paddingBottom: 48 + bottomPad,
     },
     dashboardHeader: {
       flexDirection: "row",
@@ -4798,7 +4968,6 @@ function getStyles(colors: ThemeColors) {
       color: colors.textSecondary,
     },
 
-    // Modal de puntos
     ptsOverlay: {
       flex: 1,
       backgroundColor: "rgba(0,0,0,0.55)",
@@ -4809,7 +4978,7 @@ function getStyles(colors: ThemeColors) {
     ptsCard: {
       width: "100%",
       maxWidth: 360,
-      backgroundColor: colors.surface,
+      backgroundColor: colors.background,
       borderRadius: 20,
       borderWidth: 1,
       borderColor: colors.border,
@@ -4883,7 +5052,6 @@ function getStyles(colors: ThemeColors) {
       color: colors.surface,
     },
 
-    // Guía de uso (GoalDetailModal)
     detailHelpRow: {
       flexDirection: "row",
       alignItems: "center",
@@ -4907,7 +5075,6 @@ function getStyles(colors: ThemeColors) {
       color: colors.textSecondary,
     },
 
-    // Progreso de la alcancía en el detalle
     potProgressRow: {
       flexDirection: "row",
       alignItems: "center",
@@ -4943,7 +5110,6 @@ function getStyles(colors: ThemeColors) {
       justifyContent: "center",
     },
 
-    // Aviso de meta vencida (fecha límite pasada sin lograr el monto)
     incompleteBanner: {
       flexDirection: "row",
       alignItems: "center",
@@ -4963,7 +5129,6 @@ function getStyles(colors: ThemeColors) {
       color: colors.error,
     },
 
-    // Notas vinculadas a paso (StepInfoCard)
     stepInfoNotesWrap: {
       paddingHorizontal: 16,
       paddingVertical: 8,
@@ -5002,7 +5167,6 @@ function getStyles(colors: ThemeColors) {
       fontWeight: "500",
     },
 
-    // Note viewer modal
     noteViewerOverlay: {
       flex: 1,
       backgroundColor: "rgba(0,0,0,0.4)",
@@ -5010,7 +5174,7 @@ function getStyles(colors: ThemeColors) {
       padding: 24,
     },
     noteViewerCard: {
-      backgroundColor: colors.surface,
+      backgroundColor: colors.background,
       borderRadius: 16,
       maxHeight: "70%",
       borderWidth: 1,

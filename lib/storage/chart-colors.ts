@@ -2,8 +2,6 @@ import { getDb } from "./db";
 
 const ACTIVE_KEY = "active_chart_color";
 
-// Lee el esquema de color de graficos activo desde settings. Retorna
-// "default" si no hay configuracion previa o la clave no existe.
 export async function getActiveChartColor(): Promise<string> {
   const db = getDb();
   const row = await db.getFirstAsync<{ value: string }>(
@@ -13,8 +11,6 @@ export async function getActiveChartColor(): Promise<string> {
   return row?.value ?? "default";
 }
 
-// Persiste el ID del esquema de color de graficos activo. Sobrescribe
-// cualquier valor anterior con INSERT OR REPLACE.
 export async function setActiveChartColor(id: string): Promise<void> {
   const db = getDb();
   await db.runAsync(
@@ -24,9 +20,6 @@ export async function setActiveChartColor(id: string): Promise<void> {
   );
 }
 
-// Obtiene el Set de IDs de esquemas de color comprados. Siempre incluye
-// "default" como item gratuito base. Retorna solo {"default"} si no hay
-// registros o el JSON esta corrupto.
 export async function getPurchasedChartColorIds(): Promise<Set<string>> {
   const db = getDb();
   const rows = await db.getAllAsync<{ value: string }>(
@@ -41,8 +34,7 @@ export async function getPurchasedChartColorIds(): Promise<Set<string>> {
   }
 }
 
-// Compra un esquema de color: verifica puntos, deduce el costo y agrega
-// el ID a la lista de comprados, todo en una transaccion exclusiva.
+// Transacción exclusiva: un crash entre deducción y registro no pierde puntos.
 export async function purchaseChartColor(
   id: string,
   cost: number

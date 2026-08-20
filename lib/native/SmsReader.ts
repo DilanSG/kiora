@@ -12,9 +12,14 @@ export type ParsedMovement = {
   id: string;
   type: "expense" | "income";
   amount: number;
+  // Mensaje completo formateado (comercio incluido si aparece en el texto).
   description: string;
   date: Date;
   sender: string;
+  // Nombre del remitente resuelto para mostrar (banco conocido o label).
+  senderLabel: string;
+  // Comercio extraído del texto de forma aislada (ej. "D1", "Éxito").
+  store: string;
   rawBody: string;
 };
 
@@ -52,6 +57,18 @@ export async function requestSmsPermission(): Promise<SmsPermissionResult> {
 // Abre los ajustes del sistema para que el usuario active permisos manualmente.
 // Util cuando el permiso fue denegado con "never ask again".
 export function openAppSettings(): void {
+  Linking.openSettings();
+}
+
+// En Android 14+ el sistema bloquea READ_SMS para apps instaladas fuera de
+// Play Store y no hay dialogo que lo conceda. Este helper salta directo a la
+// pantalla "Ajustes restringidos" de Kiora (via modulo nativo SmsReader);
+// sin modulo nativo o en versiones viejas, abre los ajustes de la app.
+export function openRestrictedSettings(): void {
+  if (Platform.OS === "android" && (NativeModules.SmsReader as any)?.openRestrictedSettings) {
+    (NativeModules.SmsReader as any).openRestrictedSettings();
+    return;
+  }
   Linking.openSettings();
 }
 
@@ -148,6 +165,61 @@ const KNOWN_BANK_NAMES = [
   "finandina", "jir", "coink", "vale", "sistecredito",
 ];
 
+// Nombres que requieren formato especial al mostrarse (marcas con su propia
+// capitalización). El resto se pone en Title Case simple.
+const BANK_DISPLAY_NAMES: Record<string, string> = {
+  "bancolombia": "Bancolombia",
+  "davivienda": "Davivienda",
+  "av villas": "Av Villas",
+  "banco de bogotá": "Banco de Bogotá",
+  "banco de bogota": "Banco de Bogotá",
+  "nu colombia": "Nu Colombia",
+  "lulo bank": "Lulo Bank",
+  "lulobank": "Lulo Bank",
+  "bbva": "BBVA",
+  "gnb": "GNB",
+  "itau": "Itaú",
+  "ban100": "Ban100",
+};
+
+// Title Case simple: "banco de bogota" → "Banco De Bogota" (los nombres con
+// capitalizacion propia estan en BANK_DISPLAY_NAMES).
+function titleCase(s: string): string {
+  return s
+    .trim()
+    .replace(/\s+/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+// Resuelve el remitente crudo del SMS a un nombre legible para mostrar:
+// codigos cortos numericos se dejan igual (son de bancos), textos en
+// MAYUSCULAS se normalizan a Title Case y los nombres conocidos usan su
+// capitalizacion de marca (ej. "nu colombia" → "Nu Colombia").
+function resolveSenderLabel(addr: string): string {
+  const clean = addr.trim();
+  if (BANK_SHORTCODE_RE.test(clean)) return clean;
+  const lower = clean.toLowerCase();
+  const known = KNOWN_BANK_NAMES.find((name) => lower === name || lower.includes(name));
+  if (known && BANK_DISPLAY_NAMES[known]) return BANK_DISPLAY_NAMES[known];
+  return titleCase(clean);
+}
+
+// Formatea el cuerpo completo del SMS como descripcion de movimiento:
+// quita el monto (ya se guarda aparte), unifica saltos de linea en espacios
+// y colapsa espacios multiples. El texto restante se capitaliza como inicio
+// de oracion, conservando el detalle completo del mensaje bancario.
+function formatSmsBodyDescription(body: string, amountRaw: string): string {
+  let text = body.replace(AMOUNT_RE, "");
+  text = text
+    .replace(/\$\s*/g, "")
+    .replace(/\s*[\r\n]+\s*/g, " · ")
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/\s+([.,;:!?])/g, "$1")
+    .trim();
+  if (!text) return amountRaw;
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
 // Filtra remitentes que parecen bancos o servicios financieros colombianos.
 // Banco: codigo corto numerico de 3-8 digitos o nombre en la lista blanca.
 // Esto reduce falsos positivos con SMS promocionales o personales.
@@ -167,6 +239,8 @@ const MERCHANT_PATTERNS: RegExp[] = [
   /(?:en|por)\s+([a-záéíóúñ0-9][a-záéíóúñ0-9\s\-\.&/]{2,40}?)(?:\s+el\s|\s+por\s|\s+x\s|\s+de\s+\$|\s+\$|\.|$)/i,
 ];
 
+// Extrae el nombre del comercio/establecimiento del cuerpo del mensaje
+// (ej. "Compra en D1" → "D1"). Retorna "" si no encuentra uno claro.
 function extractMerchant(body: string): string {
   for (const pattern of MERCHANT_PATTERNS) {
     const match = body.match(pattern);
@@ -175,29 +249,6 @@ function extractMerchant(body: string): string {
       if (name.length >= 2) return name;
     }
   }
-  return "";
-}
-
-function extractFallbackDescription(body: string): string {
-  const cleaned = body
-    .replace(AMOUNT_RE, "")
-    .replace(/[$]\s*/g, "")
-    .replace(/[.,;:!?]+$/, "")
-    .trim();
-
-  const fragments = cleaned.split(/\s{2,}|\.\s|\\n/);
-  for (const frag of fragments) {
-    const trimmed = frag.trim();
-    if (trimmed.length >= 5 && trimmed.length <= 60) {
-      return trimmed.charAt(0).toUpperCase() + trimmed.slice(1).toLowerCase();
-    }
-  }
-
-  const words = cleaned.split(/\s+/).filter((w) => w.length > 2);
-  if (words.length <= 6) {
-    return cleaned.slice(0, 60);
-  }
-
   return "";
 }
 
@@ -256,18 +307,21 @@ export function classifySmsMessages(messages: SmsMessage[]): ParsedMovement[] {
     if (seen.has(dedupeKey)) continue;
     seen.add(dedupeKey);
 
-    let description = extractMerchant(body);
-    if (!description) {
-      description = extractFallbackDescription(body);
-    }
+    // Comercio aislado del texto (si se extrae) para mostrarlo destacado;
+    // la descripcion real de la lista es el mensaje completo formateado.
+    const store = extractMerchant(body);
 
     results.push({
       id: `${date}-${address}-${type}-${Math.round(amount)}-${hashString(bodyKey)}`,
       type,
       amount,
-      description,
+      description: formatSmsBodyDescription(body, rawNum),
       date: new Date(date),
       sender: address,
+      // Nombre resuelto para mostrar en la lista de movimientos.
+      senderLabel: resolveSenderLabel(address),
+      // Comercio aislado del texto para mostrarlo destacado en la UI.
+      store,
       rawBody: body,
     });
   }

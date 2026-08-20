@@ -105,7 +105,7 @@ function getStyles(colors: ThemeColors) {
       backgroundColor: "rgba(0, 0, 0, 0.45)",
     },
     sheet: {
-      backgroundColor: colors.surface,
+      backgroundColor: colors.background,
       borderTopLeftRadius: 16,
       borderTopRightRadius: 16,
       borderWidth: 1,

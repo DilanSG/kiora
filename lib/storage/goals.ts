@@ -69,9 +69,8 @@ export async function getUserPoints(): Promise<number> {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
-// Marca como incompletas las metas de ahorro y alcancías cuya fecha límite
-// pasó sin lograr el monto. Se corre en cada carga para que el estado sea
-// consistente aunque la app no estuviera abierta el día de la fecha.
+// Marca incompletas las metas de ahorro/alcancía vencidas sin lograr el monto.
+// Se corre en cada carga porque la app puede no haber estado abierta ese día.
 async function markExpiredGoals(): Promise<void> {
   const db = getDb();
   await db.runAsync(
@@ -482,9 +481,8 @@ export async function markInstallmentById(installmentId: string, goalId: string)
   });
 }
 
-// Reparte entre los periodos restantes el monto de cada periodo vencido sin
-// pagar de una alcancía, y los marca como "no hecho". Retorna true si hubo
-// al menos uno repartido (para avisar al usuario).
+// Reparte entre los periodos restantes el monto de cada vencido sin pagar y
+// devuelve true si hubo al menos uno (para avisar al usuario).
 export async function redistributeMissedInstallments(goalId: string): Promise<boolean> {
   const db = getDb();
   let changed = false;
@@ -536,8 +534,7 @@ export async function redistributeMissedInstallments(goalId: string): Promise<bo
   return changed;
 }
 
-// Añade un aporte a una alcancía del modo libre (también a una meta de objeto
-// en modo ahorro libre) y la completa automáticamente cuando la suma alcanza
+// Aporte a alcancía o meta de ahorro libre; completa la meta sola al alcanzar
 // el monto deseado.
 export async function addPotContribution(goalId: string, amount: number): Promise<void> {
   const db = getDb();
@@ -592,13 +589,10 @@ export async function completeGoal(goalId: string): Promise<boolean> {
   if (!goalRow) throw new Error("Meta no encontrada.");
   if (goalRow.status === "incomplete") throw new Error("Esta meta venció sin completarse.");
 
-  // Alcancía (y ahorro libre de una meta de objeto): el modo por periodos
-  // solo necesita pagar los activos (los "no hecho" ya repartieron su monto a
-  // los restantes); el modo libre se completa al alcanzar el monto deseado.
+  // Alcancía por periodos solo paga los activos (los "no hecho" ya repartieron
+  // su monto); el modo libre se completa al alcanzar el monto deseado.
   if (goalRow.goal_type === "pot" || (goalRow.goal_type === "savings" && (goalRow.installments ?? 0) === 0)) {
     if ((goalRow.installments ?? 0) > 0) {
-      // Alcancía por periodos: solo falta pagar los activos; los "no hecho"
-      // ya repartieron su monto a los restantes.
       const missedCount = await db.getFirstAsync<{ c: number }>(
         "SELECT COUNT(*) AS c FROM goal_installments WHERE goal_id = ? AND missed = 1",
         goalId
@@ -607,7 +601,6 @@ export async function completeGoal(goalId: string): Promise<boolean> {
         throw new Error("Aun hay periodos por pagar.");
       }
     } else {
-      // Alcancía libre: se completa cuando el ahorrado alcanza el monto deseado.
       const sumRow = await db.getFirstAsync<{ s: number }>(
         "SELECT COALESCE(SUM(amount), 0) AS s FROM pot_contributions WHERE goal_id = ?",
         goalId

@@ -14,6 +14,7 @@ import { KeyboardAvoidingView } from "../ui/KeyboardAvoiding";
 import Svg, { Circle, Defs, RadialGradient, Stop, Rect } from "react-native-svg";
 import { Ionicons } from "@expo/vector-icons";
 import { useTheme, ThemeColors } from "../../lib/theme";
+import { useSafeBottom } from "../../hooks/useSafeBottom";
 import { useAlert } from "../ui/AlertModal";
 import { setUserName } from "../../lib/storage";
 import AppText from "../ui/AppText";
@@ -94,6 +95,7 @@ const BRAND_ICON_SIZE = 116;
 export default function OnboardingScreen({ onComplete }: Props) {
   const colors = useTheme();
   const styles = getStyles(colors);
+  const bottomPad = useSafeBottom();
   const { showAlert } = useAlert();
 
   const scrollRef = useRef<ScrollView>(null);
@@ -330,7 +332,7 @@ export default function OnboardingScreen({ onComplete }: Props) {
               <Ionicons name="checkmark-circle" size={18} color={colors.success} />
             )}
           </View>
-          <View style={styles.footer}>
+          <View style={[styles.footer, { paddingBottom: bottomPad + 16 }]}>
             <TouchableOpacity
               style={[styles.startBtn, !canContinue && styles.startBtnDisabled]}
               onPress={handleStart}

@@ -197,12 +197,6 @@ export default function AnimatedSplash({ onHidden }: Props) {
       >
         <Svg width={ORBIT_S} height={ORBIT_S}>
           <Defs>
-            {/* Halo suave alrededor de la zona brillante (lado derecho) */}
-            <RadialGradient id="orbitAura" cx="97%" cy="50%" r="45%">
-              <Stop offset="0%" stopColor={colors.primary} stopOpacity="0.12" />
-              <Stop offset="45%" stopColor={colors.primary} stopOpacity="0.04" />
-              <Stop offset="100%" stopColor={colors.primary} stopOpacity="0" />
-            </RadialGradient>
             {/* Degradado del anillo: opacidad progresiva desde las puntas
                 hasta el máximo en el lado derecho, sin saltos bruscos */}
             <LinearGradient id="orbitGrad" x1="0%" y1="0%" x2="100%" y2="0%">
@@ -215,9 +209,6 @@ export default function AnimatedSplash({ onHidden }: Props) {
               <Stop offset="100%" stopColor={colors.primary} stopOpacity="0.98" />
             </LinearGradient>
           </Defs>
-
-          {/* Aura radial rellenando todo el canvas */}
-          <Rect x="0" y="0" width={ORBIT_S} height={ORBIT_S} fill="url(#orbitAura)" />
 
           {/* Anillo tipo navaja relleno */}
           <Path

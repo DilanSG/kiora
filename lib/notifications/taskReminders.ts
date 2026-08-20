@@ -1,8 +1,8 @@
 import { Platform } from "react-native";
-import * as Notifications from "expo-notifications";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Task } from "../storage/types";
 import { requestNotificationPermission, setupNotificationChannel } from "./permissions";
+import { loadNotifications } from "./loader";
 
 type ScheduledReminder = {
   identifier: string;
@@ -14,8 +14,10 @@ const SCHEDULED_KEY = "kiora_scheduled_reminders";
 
 // Configura expo-notifications para mostrar alerts y banners cuando la
 // app esta en primer plano. Sin sonido ni badge por ser recordatorios
-// internos no intrusivos.
-export function configureNotificationHandler(): void {
+// internos no intrusivos. No-op donde el módulo no existe (Expo Go Android).
+export async function configureNotificationHandler(): Promise<void> {
+  const Notifications = await loadNotifications();
+  if (!Notifications) return;
   Notifications.setNotificationHandler({
     handleNotification: async () => ({
       shouldShowAlert: true,
@@ -70,6 +72,9 @@ export async function scheduleTaskReminder(task: Task): Promise<void> {
   const hasPermission = await requestNotificationPermission();
   if (!hasPermission) return;
 
+  const Notifications = await loadNotifications();
+  if (!Notifications) return;
+
   await setupNotificationChannel();
 
   await cancelTaskReminder(task.id);
@@ -98,10 +103,13 @@ export async function scheduleTaskReminder(task: Task): Promise<void> {
 
 // Cancela un recordatorio programado por ID de tarea.
 export async function cancelTaskReminder(taskId: string): Promise<void> {
+  const Notifications = await loadNotifications();
+
   const scheduled = await loadScheduled();
   const toCancel = scheduled.filter((r) => r.taskId === taskId);
 
   for (const r of toCancel) {
+    if (!Notifications) break;
     try {
       await Notifications.cancelScheduledNotificationAsync(r.identifier);
     } catch {
@@ -114,8 +122,11 @@ export async function cancelTaskReminder(taskId: string): Promise<void> {
 
 // Cancela todos los recordatorios programados.
 export async function cancelAllReminders(): Promise<void> {
+  const Notifications = await loadNotifications();
+
   const scheduled = await loadScheduled();
   for (const r of scheduled) {
+    if (!Notifications) break;
     try {
       await Notifications.cancelScheduledNotificationAsync(r.identifier);
     } catch {

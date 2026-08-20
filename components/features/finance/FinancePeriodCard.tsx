@@ -63,15 +63,19 @@ function lineSegmentStyle(
 }
 
 // Grafico de lineas minimalista sin dependencias externas (solo Views con
-// rotacion). maxVal se calcula con el maximo entre ingresos y gastos de todo
-// el periodo, o 1 si no hay datos para evitar division por cero en getY().
-// Las coordenadas se escalan proporcionalmente al area disponible del contenedor.
-function MiniLineChart({ data }: ChartProps) {
-  const colors = useTheme();
-  const chartStyles = getChartStyles(colors);
-  const [cw, setCw] = useState(0);
-  const n = data.length;
-  const maxVal = Math.max(...data.map((d) => Math.max(d.income, d.expenses)), 1);
+// rotacion). El tope de la escala es el dia MAS alto del periodo con 25% de
+// tolerancia (igual que en Balances): el pico queda dentro del area y no se
+// desborda por arriba. Si no hay datos se usa 1 para evitar division por cero.
+  function MiniLineChart({ data }: ChartProps) {
+    const colors = useTheme();
+    const chartStyles = getChartStyles(colors);
+    const [cw, setCw] = useState(0);
+    const n = data.length;
+    const series = data.map((d) => Math.max(d.income, d.expenses));
+    const topValue = Math.max(...series, 1);
+    const maxVal = topValue + topValue / 4;
+  // Con demasiados puntos (vista mes día a día) se etiqueta cada N para evitar solapes.
+  const labelStep = Math.max(1, Math.ceil(n / 12));
 
   // getX interpola linealmente la posicion horizontal de cada punto,
   // distribuyendolos uniformemente a lo ancho del area del grafico.
@@ -90,12 +94,40 @@ function MiniLineChart({ data }: ChartProps) {
     setCw(e.nativeEvent.layout.width);
   }
 
+  // Líneas horizontales que definen los valores del eje Y (máximo, mitad y cero),
+  // igual que las etiquetas del eje X definen cada punto horizontal.
+  const gridVals = [maxVal, maxVal / 2, 0];
+
   return (
     <View style={chartStyles.container}>
       <View style={chartStyles.chartArea} onLayout={onLayout}>
         {cw > 0 && (
           <>
-            {/* Segmentos de ingresos */}
+            {gridVals.map((v) => (
+              <View
+                key={`grid${v}`}
+                style={{
+                  position: "absolute",
+                  left: CHART_PAD,
+                  right: CHART_PAD,
+                  top: getY(v) - 0.5,
+                  height: 1,
+                  backgroundColor: colors.border,
+                  opacity: v === 0 ? 0.45 : 0.35,
+                }}
+              />
+            ))}
+<View
+                  style={{
+                    position: "absolute",
+                    left: CHART_PAD,
+                    top: 0,
+                width: 2,
+                height: CHART_H,
+                backgroundColor: colors.border,
+                opacity: 0.9,
+              }}
+            />
             {data.slice(0, -1).map((_, i) => (
               <View
                 key={`il${i}`}
@@ -106,7 +138,6 @@ function MiniLineChart({ data }: ChartProps) {
                 )}
               />
             ))}
-            {/* Segmentos de gastos */}
             {data.slice(0, -1).map((_, i) => (
               <View
                 key={`el${i}`}
@@ -127,7 +158,6 @@ function MiniLineChart({ data }: ChartProps) {
                 ]}
               />
             ))}
-            {/* Puntos de gastos */}
             {data.map((point, i) => (
               <View
                 key={`ed${i}`}
@@ -142,13 +172,24 @@ function MiniLineChart({ data }: ChartProps) {
         )}
       </View>
 
-      {/* Etiquetas del eje X */}
+      {/* Etiquetas del eje X: cada número centrado exactamente bajo su punto,
+          usando la misma medición de ancho y fórmula de posición que el gráfico.
+          Con muchos puntos (mes día a día) se etiqueta cada N días para que no se solapen. */}
       <View style={chartStyles.labelsRow}>
-        {data.map((_, i) => (
-          <View key={i} style={chartStyles.labelCell}>
-            <AppText style={chartStyles.label}>{i + 1}</AppText>
-          </View>
-        ))}
+        {cw > 0 &&
+          data.map((_, i) => {
+            if (i % labelStep !== 0) return null;
+            // El ancho de la etiqueta abarca el tramo entero de días que representa
+            // (labelStep celdas), así un número de dos dígitos cabe en una sola línea.
+            const cellW = n > 1 ? (cw - 2 * CHART_PAD) / (n - 1) : cw;
+            const labelW = cellW * labelStep;
+            const left = CHART_PAD + (i / Math.max(n - 1, 1)) * (cw - 2 * CHART_PAD) - labelW / 2;
+            return (
+              <View key={i} style={[chartStyles.labelCell, { left, width: labelW }]}>
+                <AppText numberOfLines={1} style={chartStyles.label}>{i + 1}</AppText>
+              </View>
+            );
+          })}
       </View>
     </View>
   );
@@ -162,6 +203,9 @@ function getChartStyles(colors: ThemeColors) {
     chartArea: {
       height: CHART_H,
       position: "relative",
+      // El pico de un recurrente excede la escala (segundo día más alto + 25%):
+      // queda recortado dentro del área en vez de dibujarse sobre lo demás.
+      overflow: "hidden",
     },
     dot: {
       position: "absolute",
@@ -176,11 +220,12 @@ function getChartStyles(colors: ThemeColors) {
       backgroundColor: colors.chartNegative || colors.error,
     },
     labelsRow: {
-      flexDirection: "row",
+      position: "relative",
+      height: 14,
       marginTop: 5,
     },
     labelCell: {
-      flex: 1,
+      position: "absolute",
       alignItems: "center",
     },
     label: {
@@ -190,8 +235,6 @@ function getChartStyles(colors: ThemeColors) {
   });
 }
 
-// Tarjeta con grafico de lineas y totales. Soporta tres periodos
-// (semana/mes/anio) navegables por scroll horizontal o pestanias.
 export default function FinancePeriodCard({
   weekStats,
   monthStats,
@@ -224,7 +267,6 @@ export default function FinancePeriodCard({
 
   return (
     <GlowView cardRadius={16} style={styles.wrapper}>
-      {/* Pestañas de periodo */}
       <View style={styles.tabs}>
         {PERIODS.map((label, i) => (
           <TouchableOpacity
@@ -252,7 +294,6 @@ export default function FinancePeriodCard({
         />
       </View>
 
-      {/* Pager horizontal */}
       <ScrollView
         ref={scrollRef}
         horizontal
@@ -265,12 +306,10 @@ export default function FinancePeriodCard({
           const isPositive = stats.balance >= 0;
           return (
             <View key={i} style={[styles.page, { width: cardWidth }]}>
-              {/* Gráfico comparativo */}
               <View style={styles.chartSide}>
                 <MiniLineChart data={breakdownByPeriod[i]} />
               </View>
 
-              {/* Totales */}
               <View style={styles.statsSide}>
                 <AppText style={styles.balanceLabel}>Balance</AppText>
                 <AppText style={[styles.balanceValue, isPositive ? styles.colorSuccess : styles.colorError]} numberOfLines={1}>
@@ -298,7 +337,6 @@ export default function FinancePeriodCard({
         })}
       </ScrollView>
 
-      {/* Leyenda */}
       <View style={styles.legend}>
         <View style={[styles.legendDot, styles.legendDotIncome]} />
         <AppText style={styles.legendText}>Ingresos</AppText>

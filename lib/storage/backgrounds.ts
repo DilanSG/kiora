@@ -2,8 +2,6 @@ import { getDb } from "./db";
 
 const ACTIVE_BACKGROUND_KEY = "active_background";
 
-// Lee el fondo activo desde settings. Retorna "flat" como default si no
-// hay fondo configurado o la clave no existe en la DB.
 export async function getActiveBackground(): Promise<string> {
   const db = getDb();
   const row = await db.getFirstAsync<{ value: string }>(
@@ -13,8 +11,6 @@ export async function getActiveBackground(): Promise<string> {
   return row?.value ?? "flat";
 }
 
-// Persiste el ID del fondo activo en settings. Sobrescribe cualquier valor
-// anterior con INSERT OR REPLACE.
 export async function setActiveBackground(bgId: string): Promise<void> {
   const db = getDb();
   await db.runAsync(
@@ -24,9 +20,6 @@ export async function setActiveBackground(bgId: string): Promise<void> {
   );
 }
 
-// Obtiene el Set de IDs de fondos comprados desde settings. Siempre incluye
-// "flat" como item gratuito base. Si no hay registros o el JSON esta
-// corrupto, retorna solo {"flat"} como safety net.
 export async function getPurchasedBackgroundIds(): Promise<Set<string>> {
   const db = getDb();
   const rows = await db.getAllAsync<{ value: string }>(
@@ -41,9 +34,7 @@ export async function getPurchasedBackgroundIds(): Promise<Set<string>> {
   }
 }
 
-// Compra un fondo: verifica puntos suficientes, deduce el costo y agrega el
-// ID a la lista de comprados. Todo dentro de una transaccion exclusiva para
-// que un crash entre la deduccion y el registro no pierda puntos.
+// Transacción exclusiva: un crash entre la deducción y el registro no pierde puntos.
 export async function purchaseBackground(
   bgId: string,
   cost: number

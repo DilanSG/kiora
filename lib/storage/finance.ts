@@ -1,4 +1,3 @@
-// Modulo de almacenamiento para transacciones financieras y categorias.
 import { Transaction, TransactionType, PeriodPoint, RecurringExpense, RecurringInterval } from "./types";
 
 import { getDb } from "./db";
@@ -27,7 +26,6 @@ type RecurringRow = {
   created_at: string;
 };
 
-// Mapea una fila de SQLite al tipo Transaction. Param row: Fila cruda. Retorna Transaction tipado.
 function rowToTransaction(row: TransactionRow): Transaction {
   return {
     id: row.id,
@@ -40,7 +38,6 @@ function rowToTransaction(row: TransactionRow): Transaction {
   };
 }
 
-// Mapea una fila SQLite de movimiento recurrente al tipo RecurringExpense.
 function rowToRecurring(row: RecurringRow): RecurringExpense {
   return {
     id: row.id,
@@ -54,9 +51,8 @@ function rowToRecurring(row: RecurringRow): RecurringExpense {
   };
 }
 
-// Devuelve la próxima ocurrencia de un gasto recurrente a partir de `from`:
-// el siguiente día con el mismo día de semana (weekly), día del mes (monthly,
-// recortado al largo del mes) o mes y día (yearly) que `anchor`.
+// Siguiente ocurrencia tras `from`: mismo día de semana (weekly), día de mes
+// recortado (monthly) o mes y día (yearly) que el ancla.
 function nextRecurringDate(anchor: Date, interval: RecurringInterval, from: Date): Date {
   if (interval === "weekly") {
     const d = new Date(from);
@@ -81,22 +77,26 @@ function nextRecurringDate(anchor: Date, interval: RecurringInterval, from: Date
   return d;
 }
 
-// Próxima fecha de cobro de un gasto recurrente desde hoy (para vistas previas).
 export function computeNextRecurrence(anchorDate: string, interval: RecurringInterval, from: Date = new Date()): Date {
   return nextRecurringDate(new Date(anchorDate), interval, from);
 }
 
-// Encadena las materializaciones: las estadísticas se cargan con Promise.all
-// y varias lecturas intentan materializar a la vez; sin este mutex, dos
-// transacciones exclusivas en paralelo chocan con "database is locked".
+// Mutex de materialización: Promise.all lanza varias lecturas en paralelo y
+// dos transacciones exclusivas chocarían con "database is locked".
 let materializeChain: Promise<void> = Promise.resolve();
 
-// Cache de la ventana ya materializada en el proceso (clave "anio-mes"):
-// evita re-escuchar el rango completo en cada carga de estadísticas. Las
-// mutaciones de plantillas la invalidan antes de materializar de nuevo.
+// Cache de la ventana materializada (clave "anio-mes") para no re-materializar
+// todo en cada carga; se invalida al mutar plantillas antes de materializar.
 let materializedWindowKey: string | null = null;
 
 function invalidateMaterializedWindow(): void {
+  materializedWindowKey = null;
+}
+
+// Espera las materializaciones en vuelo y limpia la cache: evita que una
+// transacción exclusiva abierta haga fallar el borrado con "database is locked".
+export async function flushMaterializeChain(): Promise<void> {
+  await materializeChain.catch(() => {});
   materializedWindowKey = null;
 }
 
@@ -106,12 +106,8 @@ async function materializeRecurringExpenses(): Promise<void> {
   return run;
 }
 
-// Materializa las ocurrencias de gastos recurrentes hasta fin de mes sobre
-// TODA la ventana anual (1 ene del año en curso + futuro del mes actual).
-// Así el desglose anual suma el recurrente en los meses pasados, no solo
-// desde la creación del gasto. Cada ocurrencia es una transacción real con
-// marca recurring_id; el índice único (recurring_id, date) con INSERT OR
-// IGNORE la vuelve idempotente aunque se corra varias veces.
+// Materializa sobre TODA la ventana anual para sumar el recurrente en meses
+// pasados; el índice único (recurring_id, date) hace el INSERT idempotente.
 async function materializeRecurringExpensesOnce(): Promise<void> {
   const db = getDb();
   const rows = await db.getAllAsync<RecurringRow>("SELECT * FROM recurring_expenses");
@@ -126,9 +122,8 @@ async function materializeRecurringExpensesOnce(): Promise<void> {
   await db.withExclusiveTransactionAsync(async (txn) => {
     for (const row of rows) {
       const anchor = new Date(row.anchor_date);
-      // La ventana arranca el 1 de enero del año en curso: los meses pasados
-      // del año deben sumar el recurrente. El mes de inicio del ancla acota
-      // el arranque cuando es posterior (el cobro aún no existía antes).
+      // Ventana desde el 1 de enero del año en curso para sumar meses pasados;
+      // el mes de inicio del ancla acota el arranque si el cobro aún no existía.
       const anchorMonthStart = new Date(anchor.getFullYear(), anchor.getMonth(), 1, 12, 0, 0);
       let startFrom = new Date(now.getFullYear(), 0, 1, 12, 0, 0);
       if (anchorMonthStart.getTime() > startFrom.getTime()) startFrom = anchorMonthStart;
@@ -152,7 +147,6 @@ async function materializeRecurringExpensesOnce(): Promise<void> {
   materializedWindowKey = monthKey;
 }
 
-// Deduplica categorias de forma case-insensitive preservando el orden original. Retorna lista unica y normalizada.
 function uniqueCategories(categories: string[]): string[] {
   const seen = new Set<string>();
   const result: string[] = [];
@@ -167,7 +161,6 @@ function uniqueCategories(categories: string[]): string[] {
   return result;
 }
 
-// Lista todos los movimientos financieros persistidos, del mas reciente al mas antiguo. Retorna arreglo ordenado descendente.
 export async function getTransactions(): Promise<Transaction[]> {
   const db = getDb();
   await materializeRecurringExpenses();
@@ -177,7 +170,6 @@ export async function getTransactions(): Promise<Transaction[]> {
   return rows.map(rowToTransaction);
 }
 
-// Agrega un movimiento nuevo con ID y fecha generados automaticamente. Retorna promesa resuelta al guardar.
 export async function addTransaction(
   tx: Omit<Transaction, "id" | "date"> & { date?: string }
 ): Promise<void> {
@@ -188,13 +180,11 @@ export async function addTransaction(
   );
 }
 
-// Elimina un movimiento por su identificador. Retorna promesa resuelta tras la eliminacion.
 export async function deleteTransaction(id: string): Promise<void> {
   const db = getDb();
   await db.runAsync("DELETE FROM transactions WHERE id = ?", id);
 }
 
-// Calcula ingresos, gastos y balance para un mes calendario mediante SQL agregado. Param year: Anio. Param month: Mes (0-11). Retorna totales del mes.
 export async function getMonthlyStats(
   year: number,
   month: number
@@ -218,7 +208,6 @@ export async function getMonthlyStats(
   return { income, expenses, balance: income - expenses };
 }
 
-// Devuelve las ultimas transacciones para bloques resumidos. Param limit: Cantidad maxima. Retorna subconjunto ordenado descendente.
 export async function getRecentTransactions(limit = 5): Promise<Transaction[]> {
   const db = getDb();
   const rows = await db.getAllAsync<TransactionRow>(
@@ -228,7 +217,6 @@ export async function getRecentTransactions(limit = 5): Promise<Transaction[]> {
   return rows.map(rowToTransaction);
 }
 
-// Obtiene categorias guardadas para un tipo de movimiento. Retorna lista ordenada por insercion.
 export async function getCategories(type: TransactionType): Promise<string[]> {
   const db = getDb();
   const rows = await db.getAllAsync<{ name: string }>(
@@ -238,9 +226,8 @@ export async function getCategories(type: TransactionType): Promise<string[]> {
   return rows.map((r) => r.name);
 }
 
-// Reemplaza todas las categorias de un tipo: DELETE + INSERT en una sola
-// transaccion exclusiva para que no queden datos parciales si la app
-// crashea entre la eliminacion y la insercion.
+// DELETE + INSERT en una transacción exclusiva para que un crash a mitad no
+// deje categorías parciales.
 export async function setCategoriesForType(
   type: TransactionType,
   categories: string[]
@@ -258,9 +245,6 @@ export async function setCategoriesForType(
   });
 }
 
-// Calcula ingresos, gastos y balance para la semana actual (lunes a domingo).
-// La semana arranca en lunes usando la formula (day+6)%7 para re-mapear
-// getDay() (0=Dom) a indice local (0=Lun). Retorna totales de la semana.
 export async function getWeeklyStats(): Promise<{ income: number; expenses: number; balance: number }> {
   const db = getDb();
   await materializeRecurringExpenses();
@@ -288,7 +272,6 @@ export async function getWeeklyStats(): Promise<{ income: number; expenses: numb
   return { income, expenses, balance: income - expenses };
 }
 
-// Calcula ingresos, gastos y balance para el anio calendario indicado. Retorna totales del anio.
 export async function getYearlyStats(year: number): Promise<{ income: number; expenses: number; balance: number }> {
   const db = getDb();
   await materializeRecurringExpenses();
@@ -305,8 +288,6 @@ export async function getYearlyStats(year: number): Promise<{ income: number; ex
   return { income, expenses, balance: income - expenses };
 }
 
-// Desglose diario de movimientos y ahorro para un rango de 7 dias (lun-dom).
-// Indice 0 = lunes, indice 6 = domingo. Los dias sin movimientos devuelven ceros.
 async function dailyBreakdownBetween(start: Date, end: Date): Promise<PeriodPoint[]> {
   const db = getDb();
   const rows = await db.getAllAsync<{ day: string; income: number; expenses: number }>(
@@ -334,14 +315,12 @@ async function dailyBreakdownBetween(start: Date, end: Date): Promise<PeriodPoin
     savingsByIdx.set(idx, (savingsByIdx.get(idx) ?? 0) + r.savings);
   }
 
-  // Arreglo fijo de 7 dias (lun-dom), inicializado con ceros.
-  // Los dias sin movimientos se quedan en 0 en lugar de ser omitidos,
-  // asi el grafico de linea semanal siempre muestra 7 puntos consistentes.
+  // Arreglo fijo de 7 días con ceros: el gráfico semanal siempre muestra 7
+  // puntos consistentes aunque falten movimientos.
   const result: PeriodPoint[] = Array.from({ length: 7 }, (_, i) => ({ income: 0, expenses: 0, savings: savingsByIdx.get(i) ?? 0 }));
   for (const row of rows) {
     const d = new Date(row.day + "T00:00:00Z");
-    // Re-mapeo de getUTCDay (0=Dom) a indice local (0=Lun).
-    // row.day viene de SQLite date() que siempre retorna ISO (YYYY-MM-DD), segura para Date.
+    // row.day viene de SQLite date(): siempre ISO (YYYY-MM-DD), segura para Date.
     const idx = (d.getUTCDay() + 6) % 7;
     result[idx].income = row.income;
     result[idx].expenses = row.expenses;
@@ -349,8 +328,6 @@ async function dailyBreakdownBetween(start: Date, end: Date): Promise<PeriodPoin
   return result;
 }
 
-// Devuelve el desglose diario de ingresos y gastos para la semana actual (lun-dom).
-// Retorna arreglo de 7 puntos ordenados de lunes a domingo.
 export async function getDailyBreakdownForWeek(): Promise<PeriodPoint[]> {
   const now = new Date();
   const day = now.getDay();
@@ -385,8 +362,6 @@ export async function getWeeklyStatsForWeek(
   return { income, expenses, balance: income - expenses };
 }
 
-// Devuelve el desglose diario de ingresos y gastos para la semana que inicia en el lunes indicado.
-// Param monday: Fecha del lunes. Retorna arreglo de 7 puntos (indice 0=lunes, 6=domingo).
 export async function getDailyBreakdownForWeekDate(monday: Date): Promise<PeriodPoint[]> {
   const start = new Date(monday);
   start.setHours(0, 0, 0, 0);
@@ -396,9 +371,43 @@ export async function getDailyBreakdownForWeekDate(monday: Date): Promise<Period
   return dailyBreakdownBetween(start, end);
 }
 
-// Devuelve el desglose semanal de ingresos y gastos para el mes indicado (4 semanas).
-// Semana 1 = dias 1-7, semana 2 = 8-14, semana 3 = 15-21, semana 4 = 22-fin.
-// Param year: Anio. Param month: Mes (0-11). Retorna arreglo de 4 puntos.
+export async function getDailyBreakdownForMonth(year: number, month: number): Promise<PeriodPoint[]> {
+  const db = getDb();
+  const monthStr = String(month + 1).padStart(2, "0");
+  const yearStr = String(year);
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+
+  const rows = await db.getAllAsync<{ day: number; income: number; expenses: number }>(
+    `SELECT CAST(strftime('%d', date) AS INTEGER) as day,
+       COALESCE(SUM(CASE WHEN type = 'income'  THEN amount ELSE 0 END), 0) as income,
+       COALESCE(SUM(CASE WHEN type = 'expense' THEN amount ELSE 0 END), 0) as expenses
+     FROM transactions
+     WHERE strftime('%Y', date) = ? AND strftime('%m', date) = ?
+     GROUP BY day
+     ORDER BY day ASC`,
+    [yearStr, monthStr]
+  );
+  const savingRows = await db.getAllAsync<{ day: number; savings: number }>(
+    `SELECT CAST(strftime('%d', created_at) AS INTEGER) as day, COALESCE(SUM(amount), 0) as savings
+     FROM pot_contributions
+     WHERE strftime('%Y', created_at) = ? AND strftime('%m', created_at) = ?
+     GROUP BY day`,
+    [yearStr, monthStr]
+  );
+  const savingsByDay = new Map(savingRows.map((r) => [r.day, r.savings]));
+
+  const result: PeriodPoint[] = Array.from({ length: daysInMonth }, (_, i) => ({ income: 0, expenses: 0, savings: savingsByDay.get(i + 1) ?? 0 }));
+  for (const row of rows) {
+    const idx = row.day - 1;
+    if (idx >= 0 && idx < daysInMonth) {
+      result[idx].income = row.income;
+      result[idx].expenses = row.expenses;
+    }
+  }
+  return result;
+}
+
+// Semanas del mes: 1=días 1-7, 2=8-14, 3=15-21, 4=22-fin.
 export async function getWeeklyBreakdownForMonth(year: number, month: number): Promise<PeriodPoint[]> {
   const db = getDb();
   const monthStr = String(month + 1).padStart(2, "0");
@@ -450,9 +459,6 @@ export async function getWeeklyBreakdownForMonth(year: number, month: number): P
   return result;
 }
 
-// Devuelve el desglose mensual de ingresos y gastos para el anio indicado (12 meses).
-// Indice 0 = enero, indice 11 = diciembre. Los meses sin movimientos devuelven { income: 0, expenses: 0 }.
-// Retorna arreglo de 12 puntos.
 export async function getMonthlyBreakdownForYear(year: number): Promise<PeriodPoint[]> {
   const db = getDb();
   const rows = await db.getAllAsync<{ month: number; income: number; expenses: number }>(
@@ -485,7 +491,6 @@ export async function getMonthlyBreakdownForYear(year: number): Promise<PeriodPo
   return result;
 }
 
-// Agrega una categoria nueva si no existe para el tipo indicado. Retorna coleccion final de categorias.
 export async function addCategory(
   type: TransactionType,
   name: string
@@ -500,9 +505,8 @@ export async function addCategory(
   return getCategories(type);
 }
 
-// Inserta multiples transacciones en una sola transaccion atomica.
-// Si la app crashea a mitad de la insercion, ninguna transaccion queda
-// persistida parcialmente. Param txs: Arreglo de movimientos sin ID/fecha.
+// Transacción atómica: un crash a mitad no deja movimientos parciales;
+// al terminar notifica el importe importado desde SMS.
 export async function addTransactionsBatch(
   txs: (Omit<Transaction, "id" | "date"> & { date?: string })[]
 ): Promise<void> {
@@ -520,7 +524,6 @@ export async function addTransactionsBatch(
   }
 }
 
-// Actualiza los campos editables de un movimiento existente. Retorna promesa resuelta tras la actualizacion.
 export async function updateTransaction(
   id: string,
   updates: Partial<Pick<Transaction, "type" | "amount" | "description" | "category" | "date">>
@@ -542,8 +545,6 @@ export async function updateTransaction(
 
 // ─── Movimientos recurrentes ────────────────────────────────────────────────
 
-// Lista todas las plantillas de movimientos recurrentes (gastos e ingresos),
-// de la más reciente a la más antigua.
 export async function getRecurringExpenses(): Promise<RecurringExpense[]> {
   const db = getDb();
   const rows = await db.getAllAsync<RecurringRow>(
@@ -628,7 +629,6 @@ export async function getTotalSavings(): Promise<number> {
   return row?.s ?? 0;
 }
 
-// Indica si el toggle de la estadística de ahorro está activo (persistente).
 export async function isSavingsStatEnabled(): Promise<boolean> {
   const db = getDb();
   const row = await db.getFirstAsync<{ value: string }>(

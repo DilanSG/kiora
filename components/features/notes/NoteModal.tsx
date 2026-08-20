@@ -14,6 +14,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { Note, NoteEntityType, Task, Goal, GoalStep } from "../../../lib/storage/types";
 import { useTheme, ThemeColors } from "../../../lib/theme";
 import { getTasks, getGoals } from "../../../lib/storage";
+import { useSafeBottom } from "../../../hooks/useSafeBottom";
 import AppText from "../../ui/AppText";
 
 type LinkEntry = { entityType: NoteEntityType; entityId: string };
@@ -42,6 +43,7 @@ const TYPE_OPTIONS: { value: NoteEntityType; label: string; icon: string }[] = [
 export default function NoteModal({ visible, note, prefillLinks, onSave, onClose }: Props) {
   const colors = useTheme();
   const styles = getStyles(colors);
+  const bottomPad = useSafeBottom();
   const isEditing = note !== null;
 
   const [title, setTitle] = useState("");
@@ -226,7 +228,7 @@ export default function NoteModal({ visible, note, prefillLinks, onSave, onClose
                 </TouchableOpacity>
               </ScrollView>
 
-              <View style={styles.footer}>
+              <View style={[styles.footer, { paddingBottom: bottomPad + 16 }]}>
                 <TouchableOpacity style={styles.cancelBtn} onPress={onClose}>
                   <AppText style={styles.cancelText}>Cancelar</AppText>
                 </TouchableOpacity>

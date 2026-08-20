@@ -5,17 +5,14 @@ import {
   TouchableOpacity,
   TextInput,
   ScrollView,
-  Platform,
-  StatusBar,
 } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import { Note, Task, Goal, GoalStep } from "../../../lib/storage/types";
 import { useTheme, ThemeColors } from "../../../lib/theme";
 import { getTasks, getGoals } from "../../../lib/storage";
 import AppText from "../../ui/AppText";
-
-const BOTTOM_SAFE = Platform.OS === "android" ? (StatusBar.currentHeight ?? 24) + 8 : 16;
 
 type EntityNav = {
   type: string;
@@ -33,6 +30,7 @@ type Props = {
 export default function NoteDetailView({ note, onSave, onClose }: Props) {
   const colors = useTheme();
   const router = useRouter();
+  const insets = useSafeAreaInsets();
   const styles = getStyles(colors);
 
   const [title, setTitle] = useState(note.title ?? "");
@@ -126,7 +124,7 @@ export default function NoteDetailView({ note, onSave, onClose }: Props) {
         />
       </ScrollView>
 
-      <View style={[styles.footer, { paddingBottom: BOTTOM_SAFE }]}>
+      <View style={[styles.footer, { paddingBottom: insets.bottom + 8 }]}>
         <View style={styles.metaSection}>
           <AppText style={styles.dateLabel}>
             Creada el {new Date(note.createdAt).toLocaleDateString("es", {

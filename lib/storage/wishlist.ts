@@ -1,4 +1,3 @@
-// Modulo de almacenamiento para la lista de deseos (Wishlist).
 import { WishItem } from "./types";
 
 import { getDb } from "./db";
@@ -22,9 +21,8 @@ export type LinkMetadata = {
   price?: number;
 };
 
-// Normaliza categorias usando el inicio del string para tolerar variantes
-// truncadas que hayan quedado persistidas en versiones anteriores de la app.
-// Ej: "obje" o "obj" → "objeto", "conci" → "concierto".
+// Normaliza por prefijo para tolerar variantes truncadas persistidas en
+// versiones anteriores (ej. "obje" → "objeto").
 export function normalizeWishCategory(rawCategory: string): string {
   const normalized = (rawCategory ?? "").trim().toLowerCase();
 
@@ -36,7 +34,6 @@ export function normalizeWishCategory(rawCategory: string): string {
   return normalized || "objeto";
 }
 
-// Obtiene todos los elementos de la lista de deseos persistidos, del mas reciente al mas antiguo. Retorna lista de deseos guardados.
 export async function getWishlist(): Promise<WishItem[]> {
   const db = getDb();
   const rows = await db.getAllAsync<WishItemRow>(
@@ -55,7 +52,6 @@ export async function getWishlist(): Promise<WishItem[]> {
   }));
 }
 
-// Agrega un elemento a la lista de deseos. Retorna promesa resuelta tras la persistencia.
 export async function addWishItem(
   item: Omit<WishItem, "id" | "createdAt">
 ): Promise<void> {
@@ -76,7 +72,6 @@ export async function addWishItem(
   );
 }
 
-// Actualiza un elemento existente de la lista de deseos. Retorna promesa resuelta tras la actualizacion.
 export async function updateWishItem(
   id: string,
   item: Omit<WishItem, "id" | "createdAt">
@@ -97,7 +92,6 @@ export async function updateWishItem(
   );
 }
 
-// Elimina un elemento de la lista de deseos por su identificador. Retorna promesa resuelta tras la eliminacion.
 export async function deleteWishItem(id: string): Promise<void> {
   const db = getDb();
   await db.runAsync("DELETE FROM wish_items WHERE id = ?", id);
@@ -141,9 +135,8 @@ const TRACKING_QUERY_PARAM_PATTERNS: RegExp[] = [
   /^srsltid$/i,
 ];
 
-// Limpia puntuacion y parentesis alrededor de una URL pegada por el usuario.
-// Los usuarios suelen copiar URLs de chats o mensajes que incluyen signos
-// de puntuacion adjuntos (ej. "https://ejemplo.com," o "(https://ejemplo.com)").
+// Limpia puntuación alrededor de URLs pegadas desde chats o mensajes
+// (ej. "https://ejemplo.com," o "(https://ejemplo.com)").
 function trimUrlCandidate(value: string): string {
   let output = value.trim();
   output = output.replace(/^["'""'(<[]+/, "");
@@ -165,10 +158,8 @@ function trimUrlCandidate(value: string): string {
   return output.trim();
 }
 
-// Intenta extraer el primer enlace desde texto libre. El orden de busqueda
-// es: URL con protocolo explicito → protocol-relative (//...) → dominio
-// simple. Esto permite que el usuario pegue texto con contexto adicional
-// sin que la extraccion falle.
+// Extrae el primer enlace del texto: protocolo explícito → // → dominio,
+// para tolerar texto con contexto adicional pegado por el usuario.
 function extractFirstLinkFromText(rawInput: string): string | undefined {
   const compact = rawInput.replace(/\s+/g, " ").trim();
   if (!compact) {
@@ -193,14 +184,11 @@ function extractFirstLinkFromText(rawInput: string): string | undefined {
   return trimUrlCandidate(compact);
 }
 
-// Intenta parsear un string como URL. Si no trae protocolo, asume https://.
-// Solo acepta http:// y https://, descartando otros protocolos como ftp: o
-// javascript:. Retorna undefined si el string es invalido o esta vacio.
+// Asume https:// si falta protocolo y descarta ftp:/javascript: por seguridad.
 function parseHttpUrl(value: string): URL | undefined {
   const trimmed = value.trim();
   if (!trimmed) return undefined;
 
-  // Si no trae protocolo, se asume https:// por defecto.
   const withProtocol = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
 
   try {
@@ -214,14 +202,12 @@ function parseHttpUrl(value: string): URL | undefined {
   }
 }
 
-// Verifica si un string parece una URL embebida (ej. en query params de redireccion).
 function isLikelyEmbeddedUrl(value: string): boolean {
   return parseHttpUrl(value) !== undefined;
 }
 
-// Desenreda URLs de redireccion explorando los query params mas comunes
-// (url, redirect, u, etc.) hasta 4 niveles de profundidad. Esto permite
-// obtener la URL final de servicios como l.instagram.com o t.co.
+// Desenreda redirecciones explorando query params (url, redirect, u…) hasta
+// 4 niveles, para llegar a la URL final de servicios como t.co.
 function unwrapRedirectUrl(initialUrl: URL): URL {
   let current = new URL(initialUrl.toString());
 
@@ -252,9 +238,8 @@ function unwrapRedirectUrl(initialUrl: URL): URL {
   return current;
 }
 
-// Elimina parametros de tracking (utm_*, fbclid, gclid, etc.) para que
-// los enlaces guardados sean limpios y consistentes entre sesiones.
-// La lista de patrones esta en TRACKING_QUERY_PARAM_PATTERNS.
+// Elimina parámetros de tracking (utm_*, fbclid, gclid…) para enlaces
+// limpios y consistentes entre sesiones.
 function stripTrackingParams(url: URL): URL {
   const cleaned = new URL(url.toString());
 
@@ -268,9 +253,6 @@ function stripTrackingParams(url: URL): URL {
   return cleaned;
 }
 
-// Procesa una URL completa: extrae el primer enlace del texto, parsea,
-// desenreda redirecciones (hasta 4 niveles), elimina parametros de tracking
-// y remueve el hash. Lanza si el input no contiene una URL valida.
 export function normalizeWishlistLink(rawUrl: string): string {
   const extracted = extractFirstLinkFromText(rawUrl);
   if (!extracted) {
@@ -289,7 +271,7 @@ export function normalizeWishlistLink(rawUrl: string): string {
   return sanitized.toString();
 }
 
-// Crea un titulo legible a partir de un enlace para usarlo como fallback. Retorna titulo estimado basado en slug o dominio.
+// Título legible de respaldo derivado del slug o dominio del enlace.
 export function deriveWishTitleFromLink(rawUrl: string): string {
   try {
     const parsed = new URL(normalizeWishlistLink(rawUrl));
@@ -330,10 +312,8 @@ export function deriveWishTitleFromLink(rawUrl: string): string {
   }
 }
 
-// Decodifica entidades HTML (numericas, hexadecimales y nombradas) a texto
-// legible. Esto es necesario porque los metadatos de sitios web suelen
-// contener entidades como &#8212; o &amp; que deben convertirse para
-// mostrarse correctamente en la UI.
+// Decodifica entidades HTML de los metadatos (&#8212;, &amp;…): sin esto la
+// UI mostraría el texto codificado de los sitios.
 function decodeHtmlEntities(input: string): string {
   const namedEntities: Record<string, string> = {
     amp: "&",
@@ -356,7 +336,6 @@ function decodeHtmlEntities(input: string): string {
     .replace(/&([a-z]+);/gi, (match, name: string) => namedEntities[name.toLowerCase()] ?? match);
 }
 
-// Limpia texto extraido desde HTML eliminando etiquetas y espacios sobrantes.
 function normalizeExtractedText(value: string): string {
   return decodeHtmlEntities(value)
     .replace(/<[^>]*>/g, " ")
@@ -364,7 +343,6 @@ function normalizeExtractedText(value: string): string {
     .trim();
 }
 
-// Intenta decodificar una parte de URL sin lanzar excepciones.
 function safeDecodeURIComponent(value: string): string {
   try {
     return decodeURIComponent(value);
@@ -373,7 +351,6 @@ function safeDecodeURIComponent(value: string): string {
   }
 }
 
-// Convierte una cadena en formato de titulo para UI.
 function titleCase(value: string): string {
   return value
     .split(" ")
@@ -386,10 +363,8 @@ function titleCase(value: string): string {
     .trim();
 }
 
-// Parsea atributos de una etiqueta HTML usando regex. Soporta valores
-// entre comillas dobles, simples y sin comillas. Es un parser simple
-// que no maneja correctamente todos los casos borde del HTML, pero es
-// suficiente para las etiquetas <meta> y <link> que aparecen en <head>.
+// Parser regex simple de atributos: no cubre todos los bordes del HTML,
+// pero basta para las etiquetas <meta> y <link> del <head>.
 function parseTagAttributes(tag: string): Record<string, string> {
   const attrs: Record<string, string> = {};
   const attrRegex = /([a-zA-Z_:.-]+)\s*=\s*("([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/g;
@@ -404,9 +379,8 @@ function parseTagAttributes(tag: string): Record<string, string> {
   return attrs;
 }
 
-// Extrae todas las etiquetas <meta> del HTML y las convierte en pares
-// (key, content) usando property, name o itemprop como clave. Esto permite
-// consultar metadatos por prioridad: OG > Twitter > HTML clasico.
+// Convierte <meta> en pares (key, content) con property/name/itemprop, para
+// consultarlos por prioridad OG > Twitter > HTML clásico.
 function parseMetaEntries(html: string): MetaEntry[] {
   const entries: MetaEntry[] = [];
   const metaRegex = /<meta\b[^>]*>/gi;
@@ -424,7 +398,6 @@ function parseMetaEntries(html: string): MetaEntry[] {
   return entries;
 }
 
-// Obtiene el primer valor de meta que coincida con la lista de claves.
 function pickMetaByPriority(metaEntries: MetaEntry[], keys: string[]): string | undefined {
   for (const key of keys) {
     const found = metaEntries.find((entry) => entry.key === key);
@@ -435,11 +408,8 @@ function pickMetaByPriority(metaEntries: MetaEntry[], keys: string[]): string | 
   return undefined;
 }
 
-// Parsea valores monetarios desde texto extraido de paginas web. El formato
-// es impredecible: puede usar punto o coma como separador decimal, tener
-// espacios duros (\u00A0), simbolos de moneda, etc. La heuristica detecta
-// si el ultimo separador es coma (formato europeo) o punto (formato US) y
-// normaliza a punto decimal. Solo acepta valores positivos finitos.
+// Precios de web: formato impredecible (coma/punto decimal, NBSP). Usa el
+// último separador para normalizar a punto; solo acepta positivos finitos.
 function parsePriceCandidate(rawValue: string): number | undefined {
   const cleaned = rawValue
     .replace(/\s|\u00A0/g, "")
@@ -480,7 +450,6 @@ function parsePriceCandidate(rawValue: string): number | undefined {
   return parsed;
 }
 
-// Obtiene el precio desde Twitter Cards cuando existe label/data por pares.
 function pickTwitterCardPrice(metaEntries: MetaEntry[]): number | undefined {
   for (let index = 1; index <= 4; index += 1) {
     const label = pickMetaByPriority(metaEntries, [`twitter:label${index}`]);
@@ -501,11 +470,8 @@ function pickTwitterCardPrice(metaEntries: MetaEntry[]): number | undefined {
   return undefined;
 }
 
-// Busca bloques <script type="application/ld+json"> en el HTML y los parsea
-// como JSON-LD. Estos bloques contienen datos estructurados de producto que
-// suelen ser mas precisos que las OG metas. Se ignora cualquier bloque con
-// JSON invalido para no romper la extraccion del resto de metadatos.
-// https://json-ld.org/spec/latest/json-ld/
+// Bloques application/ld+json: datos de producto más precisos que OG; ignora
+// JSON inválido para no romper la extracción del resto.
 function extractJsonLdObjects(html: string): Record<string, unknown>[] {
   const scriptRegex = /<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
   const results: Record<string, unknown>[] = [];
@@ -518,14 +484,12 @@ function extractJsonLdObjects(html: string): Record<string, unknown>[] {
       const parsed = JSON.parse(raw) as unknown;
       collectJsonLdObjects(parsed, results);
     } catch {
-      // ignora bloques JSON-LD invalidos
     }
   }
 
   return results;
 }
 
-// Aplana estructuras JSON-LD con grafos y arreglos.
 function collectJsonLdObjects(value: unknown, collector: Record<string, unknown>[]): void {
   if (Array.isArray(value)) {
     for (const item of value) {
@@ -547,7 +511,6 @@ function collectJsonLdObjects(value: unknown, collector: Record<string, unknown>
   }
 }
 
-// Obtiene una URL de imagen desde una propiedad JSON-LD flexible.
 function readJsonLdImage(imageValue: unknown): string | undefined {
   if (typeof imageValue === "string") {
     const normalized = normalizeExtractedText(imageValue);
@@ -576,7 +539,6 @@ function readJsonLdImage(imageValue: unknown): string | undefined {
   return undefined;
 }
 
-// Intenta resolver una URL potencialmente relativa contra una base.
 function toAbsoluteUrl(candidate: string, baseUrl: string): string | undefined {
   const normalizedCandidate = normalizeExtractedText(candidate);
   if (!normalizedCandidate) return undefined;
@@ -588,7 +550,7 @@ function toAbsoluteUrl(candidate: string, baseUrl: string): string | undefined {
   }
 }
 
-// Limpia titulos poco utiles y elimina sufijos de marca cuando aplica.
+// Filtra títulos bloqueados y separa sufijos de marca (| · • -) del resto.
 function sanitizeTitleCandidate(rawValue: string | undefined): string | undefined {
   if (!rawValue) return undefined;
 
@@ -629,7 +591,6 @@ function sanitizeTitleCandidate(rawValue: string | undefined): string | undefine
   return selected;
 }
 
-// Normaliza descripcion para evitar bloques vacios, cortos o excesivos.
 function sanitizeDescriptionCandidate(rawValue: string | undefined): string | undefined {
   if (!rawValue) return undefined;
 
@@ -645,7 +606,7 @@ function sanitizeDescriptionCandidate(rawValue: string | undefined): string | un
   return normalized;
 }
 
-// Normaliza una URL de imagen y descarta data-urls u otros formatos no utiles.
+// Descarta data-URLs e imágenes vacías; el resto se resuelve a absoluta.
 function sanitizeImageCandidate(rawValue: string | undefined, baseUrl: string): string | undefined {
   if (!rawValue) return undefined;
 
@@ -657,7 +618,6 @@ function sanitizeImageCandidate(rawValue: string | undefined, baseUrl: string): 
   return toAbsoluteUrl(normalized, baseUrl);
 }
 
-// Busca el endpoint oEmbed declarado por la pagina si esta disponible.
 function extractOEmbedEndpoint(html: string, baseUrl: string): string | undefined {
   const linkRegex = /<link\b[^>]*>/gi;
   let match: RegExpExecArray | null;
@@ -685,9 +645,8 @@ function extractOEmbedEndpoint(html: string, baseUrl: string): string | undefine
   return undefined;
 }
 
-// Fetch con AbortController para implementar timeout. El User-Agent se
-// envia como navegador desktop para que los endpoints oEmbed no rechacen
-// la peticion. El timeout evita que un sitio lento bloque la UI.
+// Timeout con AbortController y UA de navegador desktop: evita que un sitio
+// lento bloquee la UI y que los endpoints oEmbed rechacen la petición.
 async function fetchJsonWithTimeout(url: string, timeoutMs: number): Promise<Record<string, unknown> | undefined> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
@@ -719,7 +678,6 @@ async function fetchJsonWithTimeout(url: string, timeoutMs: number): Promise<Rec
   }
 }
 
-// Obtiene metadatos por oEmbed desde el endpoint del sitio o desde noembed.
 async function fetchOEmbedMetadata(sourceUrl: string, html: string): Promise<LinkMetadata> {
   const endpoints: string[] = [];
   const pageOEmbed = extractOEmbedEndpoint(html, sourceUrl);
@@ -762,7 +720,6 @@ async function fetchOEmbedMetadata(sourceUrl: string, html: string): Promise<Lin
   return {};
 }
 
-// Ejecuta una peticion HTML con timeout.
 async function fetchHtmlWithTimeout(
   url: string,
   timeoutMs: number,
@@ -787,15 +744,13 @@ async function fetchHtmlWithTimeout(
   }
 }
 
-// Analiza HTML para obtener titulo, descripcion, imagen y precio de un producto,
-// combinando Open Graph, Twitter Cards y JSON-LD con fallback de regex.
-// Param url: Direccion web. Retorna objeto con datos recolectados del sitio.
+// Extrae título, descripción, imagen y precio combinando OG, Twitter y JSON-LD
+// con fallback de regex.
 export async function fetchLinkMetadata(url: string): Promise<LinkMetadata> {
   try {
     const formattedUrl = normalizeWishlistLink(url);
-    // Dos perfiles de User-Agent para sortear bloqueos por bot detection.
-    // El primero es un Chrome desktop estandar, el segundo es un Safari
-    // movil. Algunos sitios devuelven HTML diferente segun el UA.
+    // Dos perfiles de UA (desktop/móvil) para sortear bot detection: algunos
+    // sitios devuelven HTML distinto según el agente.
     const headerCandidates: Record<string, string>[] = [
       {
         "User-Agent":
@@ -824,10 +779,9 @@ export async function fetchLinkMetadata(url: string): Promise<LinkMetadata> {
     }
 
     if (!html) {
-      // El sitio rechazó la descarga (bloqueo por bot, error del servidor,
-      // etc). Todavía se puede rescatar título e imagen por oEmbed que no
-      // requieren el HTML del sitio, y en el peor caso se deriva un título
-      // legible del propio enlace.
+// Sitio rechazado (bot o error de servidor): igual se rescata título/imagen
+    // por oEmbed (no requiere HTML) y en el peor caso el título se deriva del
+    // propio enlace.
       const oEmbedMetadata = await fetchOEmbedMetadata(formattedUrl, "");
       return {
         title: sanitizeTitleCandidate(oEmbedMetadata.title) || deriveWishTitleFromLink(formattedUrl),

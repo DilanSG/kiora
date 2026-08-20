@@ -3,8 +3,6 @@ import { getDb } from "./db";
 const ACTIVE_KEY = "active_button_color";
 const CLAIMED_KEY = "free_points_claimed";
 
-// Lee el color de boton activo desde settings. Retorna "default" si no
-// hay configuracion previa o la clave no existe en la DB.
 export async function getActiveButtonColor(): Promise<string> {
   const db = getDb();
   const row = await db.getFirstAsync<{ value: string }>(
@@ -14,8 +12,6 @@ export async function getActiveButtonColor(): Promise<string> {
   return row?.value ?? "default";
 }
 
-// Persiste el ID del color de boton activo. Sobrescribe el valor anterior
-// con INSERT OR REPLACE.
 export async function setActiveButtonColor(id: string): Promise<void> {
   const db = getDb();
   await db.runAsync(
@@ -25,9 +21,6 @@ export async function setActiveButtonColor(id: string): Promise<void> {
   );
 }
 
-// Obtiene el Set de IDs de colores de boton comprados. Siempre incluye
-// "default" como item gratuito base. Retorna solo {"default"} si no hay
-// registros o el JSON esta corrupto.
 export async function getPurchasedButtonColorIds(): Promise<Set<string>> {
   const db = getDb();
   const rows = await db.getAllAsync<{ value: string }>(
@@ -42,8 +35,7 @@ export async function getPurchasedButtonColorIds(): Promise<Set<string>> {
   }
 }
 
-// Compra un color de boton: verifica puntos, deduce el costo y agrega
-// el ID a la lista de comprados, todo en una transaccion exclusiva.
+// Transacción exclusiva: un crash entre deducción y registro no pierde puntos.
 export async function purchaseButtonColor(
   id: string,
   cost: number
@@ -90,8 +82,7 @@ export async function purchaseButtonColor(
   }
 }
 
-// Verifica si el usuario ya reclamo los puntos gratis. Usa string "1"
-// como flag booleano porque settings almacena todo como TEXT.
+// Flag "1" como booleano: settings guarda todo como TEXT.
 export async function hasClaimedFreePoints(): Promise<boolean> {
   const db = getDb();
   const row = await db.getFirstAsync<{ value: string }>(
@@ -101,16 +92,15 @@ export async function hasClaimedFreePoints(): Promise<boolean> {
   return row?.value === "1";
 }
 
-// Otorga 50 puntos gratis al usuario (una unica vez por dispositivo).
-// Corre dentro de una transaccion para que el incremento y el flag de
-// "ya reclamado" se persistan juntos o no se persistan.
+// 150 puntos gratis, una única vez por dispositivo: la transacción persiste
+// el incremento y el flag juntos o no persiste ninguno.
 export async function claimFreePoints(): Promise<void> {
   const db = getDb();
   await db.withExclusiveTransactionAsync(async (txn) => {
     await txn.runAsync(
       `INSERT INTO settings (key, value) VALUES (?, ?)
        ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + ?`,
-      ["user_points", "50", 50]
+      ["user_points", "150", 150]
     );
     await txn.runAsync(
       "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",

@@ -1,9 +1,7 @@
 import { getDb } from "./db";
 
-// Compra en lote de un "recomendado": desbloquea todos sus assets (tema,
-// fondo, color, gráfica, movimiento, brillo) como si se compraran uno por
-// uno. Una sola transaccion exclusiva: verifica puntos, deduce el total y
-// agrega cada ID faltante a su lista de comprados.
+// Compra en lote de un "recomendado" (todos sus assets de una). Una sola
+// transacción exclusiva: un crash a mitad no pierde puntos ni deja a medias.
 
 export type BundleEntry = {
   key: string;

@@ -3,62 +3,103 @@ import * as SecureStore from "expo-secure-store";
 
 export const SYNC_KEY_SECURE = "kiora_sync_key_secure";
 
-// Contador monotonico por proceso que se incrementa en cada llamada a
-// generateId(). Esto reduce drasticamente la ventana de colision cuando
-// se insertan varios registros en el mismo milisegundo (ej. al sync).
-// >>> 0 fuerza el resultado a unsigned int32, evitando desbordes negativos.
+// Contador monotónico que reduce la ventana de colisión al insertar varios
+// registros en el mismo ms (ej. sync). >>> 0 fuerza unsigned int32.
 let idCounter = 0;
 
-// Normaliza el nombre de una categoria: recorta espacios externos y colapsa
-// whitespace multiple interno a un solo espacio. Esto evita duplicados como
-// "Comida " y "Comida" siendo tratados como categorias diferentes.
+// Colapsa espacios para que "Comida " y "Comida" no se traten como
+// categorías distintas.
 export function normalizeCategory(name: string): string {
   return name.trim().replace(/\s+/g, " ");
 }
 
-// Genera un ID unico en formato base36: timestamp + contador monotono + 12
-// caracteres aleatorios. El contador por proceso reduce la ventana de colision
-// cuando se insertan varios registros en el mismo milisegundo (ej. sync).
+// Canje único del código secreto: el flag se persiste en la misma transacción
+// que el incremento para que un crash no permita canjear dos veces.
+const SECRET_CODE_KEY = "secret_code_redeemed";
+
+export async function hasRedeemedSecretCode(): Promise<boolean> {
+  const db = getDb();
+  const row = await db.getFirstAsync<{ value: string }>(
+    "SELECT value FROM settings WHERE key = ?",
+    SECRET_CODE_KEY
+  );
+  return row?.value === "1";
+}
+
+export async function redeemSecretCode(points: number): Promise<void> {
+  const db = getDb();
+  await db.withExclusiveTransactionAsync(async (txn) => {
+    await txn.runAsync(
+      `INSERT INTO settings (key, value) VALUES (?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + ?`,
+      ["user_points", String(points), points]
+    );
+    await txn.runAsync(
+      "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+      SECRET_CODE_KEY,
+      "1"
+    );
+  });
+}
+
+// Prefiere crypto.randomUUID() (UUID v4, sin colisiones por timestamp); en
+// motores sin la API cae al esquema base36 con contador monotónico.
 export function generateId(): string {
+  const g = globalThis as typeof globalThis & { crypto?: { randomUUID?: () => string } };
+  if (g.crypto?.randomUUID) return g.crypto.randomUUID();
+
   idCounter = (idCounter + 1) >>> 0;
   const time = Date.now().toString(36);
   const count = idCounter.toString(36).padStart(2, "0");
-  // Dos segmentos aleatorios base36 de 6 caracteres cada uno, lo que da
-  // aproximadamente 36^12 ≈ 4.7e18 combinaciones posibles por milisegundo.
+  // 36^12 ≈ 4.7e18 combinaciones por ms gracias a los dos segmentos aleatorios.
   const r1 = Math.random().toString(36).slice(2, 8);
   const r2 = Math.random().toString(36).slice(2, 8);
   return `${time}-${count}-${r1}${r2}`;
 }
 
-// Claves de settings que pertenecen al mundo de estilos (tiendas + puntos).
-const STYLE_KEYS = [
-  "active_theme", "purchased_themes",
-  "active_background", "purchased_backgrounds",
-  "active_button_color", "purchased_button_colors", "free_points_claimed",
-  "active_chart_color", "purchased_chart_colors",
-  "active_movement_layer", "purchased_movement_layers",
-  "active_glow_id", "glow_intensity", "purchased_glow",
-  "user_points", "reported_configs",
+// Claves de settings agrupadas por mundo visual, para borrar y reportar
+// progreso por categoría (el grupo trae la clave activa junto a las compradas).
+const STYLE_GROUPS: { label: string; keys: string[] }[] = [
+  { label: "Temas", keys: ["active_theme", "purchased_themes"] },
+  { label: "Fondos", keys: ["active_background", "purchased_backgrounds"] },
+  { label: "Colores de botones", keys: ["active_button_color", "purchased_button_colors", "free_points_claimed"] },
+  { label: "Paletas de gráficas", keys: ["active_chart_color", "purchased_chart_colors"] },
+  { label: "Movimientos visuales", keys: ["active_movement_layer", "purchased_movement_layers"] },
+  { label: "Brillos", keys: ["active_glow_id", "glow_intensity", "purchased_glow"] },
+  { label: "Koins", keys: ["user_points"] },
+  { label: "Reportes", keys: ["reported_configs"] },
 ];
 
-// Borra solo el mundo de estilos: comprados, activos, puntos y reportes.
-// Deja intactas las demás tablas y la configuracion de sincronizacion.
-export async function clearStyleData(): Promise<void> {
+// Progreso del borrado: qué se está borrando y qué paso lleva el total.
+export type DeleteProgress = { label: string; done: number; total: number };
+
+// Borra solo estilos, dejando intacta la sincronización. Sin transacción
+// única: la cola queda libre entre pasos y la UI pinta el progreso en vivo.
+export async function clearStyleData(onProgress?: (p: DeleteProgress) => void): Promise<void> {
   const db = getDb();
-  await db.runAsync(
-    `DELETE FROM settings WHERE key IN (${STYLE_KEYS.map(() => "?").join(", ")})`,
-    ...STYLE_KEYS
-  );
+  const total = STYLE_GROUPS.length;
+  for (let i = 0; i < total; i += 1) {
+    const group = STYLE_GROUPS[i];
+    onProgress?.({ label: group.label, done: i + 1, total });
+    await db.runAsync(
+      `DELETE FROM settings WHERE key IN (${group.keys.map(() => "?").join(", ")})`,
+      ...group.keys
+    );
+  }
 }
 
-// Borra solo el mundo de finanzas: movimientos, categorias y recurrentes.
-export async function clearFinanceData(): Promise<void> {
+export async function clearFinanceData(onProgress?: (p: DeleteProgress) => void): Promise<void> {
   const db = getDb();
-  await db.execAsync(`
-    DELETE FROM transactions;
-    DELETE FROM categories;
-    DELETE FROM recurring_expenses;
-  `);
+  const steps = [
+    { label: "Movimientos", sql: "DELETE FROM transactions" },
+    { label: "Categorías", sql: "DELETE FROM categories" },
+    { label: "Recurrentes", sql: "DELETE FROM recurring_expenses" },
+  ];
+  const total = steps.length;
+  for (let i = 0; i < total; i += 1) {
+    onProgress?.({ label: steps[i].label, done: i + 1, total });
+    await db.runAsync(steps[i].sql);
+  }
 }
 
 // Cuenta los elementos que se van a borrar para mostrarlos en la vista de
@@ -129,19 +170,30 @@ export async function getDataCounts(kind: "styles" | "finance" | "all"): Promise
   };
 }
 
-export async function clearAllData(): Promise<void> {
+export async function clearAllData(onProgress?: (p: DeleteProgress) => void): Promise<void> {
   const db = getDb();
-  // Borra todas las tablas de datos, pero NO resetea el schema.
-  // Los contadores y settings se pierden; la sync_key en SecureStore
-  // tambien se elimina para que el sync quede desconfigurado.
-  await db.execAsync(`
-    DELETE FROM tasks;
-    DELETE FROM notes;
-    DELETE FROM transactions;
-    DELETE FROM categories;
-    DELETE FROM wish_items;
-    DELETE FROM settings;
-  `);
+  // Sin transacción única: la cola queda libre entre pasos para pintar el
+  // progreso en vivo; un crash deja borrado parcial (aceptable, destructivo).
+  const steps = [
+    { label: "Pasos de metas", sql: "DELETE FROM goal_steps" },
+    { label: "Cuotas", sql: "DELETE FROM goal_installments" },
+    { label: "Aportes", sql: "DELETE FROM pot_contributions" },
+    { label: "Metas", sql: "DELETE FROM goals" },
+    { label: "Tareas", sql: "DELETE FROM tasks" },
+    { label: "Vínculos de notas", sql: "DELETE FROM note_links" },
+    { label: "Notas", sql: "DELETE FROM notes" },
+    { label: "Movimientos", sql: "DELETE FROM transactions" },
+    { label: "Categorías", sql: "DELETE FROM categories" },
+    { label: "Recurrentes", sql: "DELETE FROM recurring_expenses" },
+    { label: "Deseos", sql: "DELETE FROM wish_items" },
+    { label: "Notificaciones", sql: "DELETE FROM app_notifications" },
+    { label: "Estilos y koins", sql: "DELETE FROM settings" },
+  ];
+  const total = steps.length;
+  for (let i = 0; i < total; i += 1) {
+    onProgress?.({ label: steps[i].label, done: i + 1, total });
+    await db.runAsync(steps[i].sql);
+  }
   try {
     await SecureStore.deleteItemAsync(SYNC_KEY_SECURE);
   } catch {

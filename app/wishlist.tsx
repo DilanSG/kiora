@@ -9,6 +9,7 @@ import {
   Linking,
   ScrollView,
   Platform,
+  Image,
 } from "react-native";
 import { KeyboardAvoidingView } from "../components/ui/KeyboardAvoiding";
 import { useState } from "react";
@@ -30,6 +31,69 @@ import BackgroundDecor from "../components/ui/BackgroundDecor";
 import EmptyState from "../components/ui/EmptyState";
 import AppText from "../components/ui/AppText";
 import { formatInput, formatNumber, parseAmountInput } from "../lib/currency";
+import { useSafeBottom } from "../hooks/useSafeBottom";
+import { launchImageLibraryAsync } from "expo-image-picker";
+import { manipulateAsync, SaveFormat } from "expo-image-manipulator";
+import { Directory, File, Paths } from "expo-file-system";
+
+// Carpeta local donde viven las imágenes subidas desde el celular. Vivir en
+// documentDirectory (no en cache) garantiza que sobrevivan a la limpieza del
+// sistema; la base guarda la ruta file:// como cualquier otra URI.
+const WISH_IMAGE_DIR = "wishlist-images";
+
+// Genera un nombre de archivo único sin depender de crypto.randomUUID (no
+// garantizado en el runtime de React Native), igual esquema que generateId.
+function newImageFileName(): string {
+  const rand = Math.random().toString(36).slice(2, 10);
+  return `${Date.now().toString(36)}-${rand}.jpg`;
+}
+
+// Re-encodea la imagen elegida a JPEG y la guarda en la carpeta local. El
+// re-encode descarta metadatos EXIF (GPS, cámara, etc.): la app no guarda
+// información del dispositivo de origen, solo la foto en sí.
+// Cada paso degrada con gracia: si el re-encode falla se usa la foto
+// original y si la copia falla se usa la URI del re-encode (en cache).
+async function persistWishImage(sourceUri: string): Promise<string> {
+  let processedUri = sourceUri;
+  try {
+    const processed = await manipulateAsync(
+      sourceUri,
+      [],
+      { compress: 0.85, format: SaveFormat.JPEG }
+    );
+    processedUri = processed.uri;
+  } catch (err) {
+    console.error("persistWishImage: re-encode falló, uso la original", err);
+  }
+
+  try {
+    const dir = new Directory(Paths.document, WISH_IMAGE_DIR);
+    if (!dir.exists) {
+      dir.create({ intermediates: true, idempotent: true });
+    }
+    const dest = new File(dir, newImageFileName());
+    if (dest.exists) dest.delete();
+    new File(processedUri).copy(dest);
+    return dest.uri;
+  } catch (err) {
+    console.error("persistWishImage: copia falló, uso la URI procesada", err);
+    return processedUri;
+  }
+}
+
+// Borra una imagen local de la app si la URI guardada apunta a nuestra
+// carpeta (las URLs remotas no se tocan, son del sitio del producto).
+function removeLocalWishImage(uri: string | undefined | null) {
+  if (!uri) return;
+  try {
+    const f = new File(uri);
+    if (f.uri.startsWith(`${Paths.document.uri}${WISH_IMAGE_DIR}/`)) {
+      if (f.exists) f.delete();
+    }
+  } catch {
+    // URI malformada (p. ej. ya borrada): ignorar.
+  }
+}
 
 type WishCategory = "objeto" | "concierto" | "gusto" | "otro";
 const WISH_CATEGORIES = ["objeto", "concierto", "gusto", "otro"] as const;
@@ -76,19 +140,19 @@ function inferWishCategory(text: string): WishCategory {
   return "objeto";
 }
 
-// Pantalla de Lista de Deseos (Wishlist) con carga rápida de metadatos de enlaces de compras.
 export default function WishlistScreen() {
   const colors = useTheme();
-  const styles = getStyles(colors);
+  const bottomPad = useSafeBottom();
+  const styles = getStyles(colors, bottomPad);
   const { glowStyle } = useGlow();
 
   const { items, addWishItem, updateWishItem, deleteWishItem } = useWishlist();
   const { showAlert } = useAlert();
   const [modalVisible, setModalVisible] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [pickingImage, setPickingImage] = useState(false);
   const [editingItemId, setEditingItemId] = useState<string | null>(null);
 
-  // Campos para el formulario
   const [linkInput, setLinkInput] = useState("");
   const [titleInput, setTitleInput] = useState("");
   const [amountInput, setAmountInput] = useState("");
@@ -99,7 +163,6 @@ export default function WishlistScreen() {
   const [viewingItem, setViewingItem] = useState<WishItem | null>(null);
   const isEditing = editingItemId !== null;
 
-  // Limpia el formulario del modal después de guardar o cancelar una carga.
   const resetForm = () => {
     setLinkInput("");
     setTitleInput("");
@@ -110,19 +173,16 @@ export default function WishlistScreen() {
     setEditingItemId(null);
   };
 
-  // Abre el modal para crear un nuevo deseo.
   const handleOpenCreateModal = () => {
     resetForm();
     setModalVisible(true);
   };
 
-  // Cierra el modal de wishlist restaurando el estado del formulario.
   const handleCloseModal = () => {
     setModalVisible(false);
     resetForm();
   };
 
-  // Carga en el formulario un deseo existente para editarlo.
   const handleStartEdit = (item: WishItem) => {
     const rawCategory = normalizeWishCategory(item.category ?? "");
     const nextCategory = WISH_CATEGORIES.includes(rawCategory as WishCategory)
@@ -341,6 +401,12 @@ export default function WishlistScreen() {
     };
 
     if (editingItemId) {
+      // Al editar, si el deseo tenía una imagen local y el formulario la
+      // reemplazó (o la quitó), se borra el archivo que quedó huérfano.
+      const prev = items.find((w) => w.id === editingItemId);
+      if (prev?.image && prev.image !== finalImage) {
+        removeLocalWishImage(prev.image);
+      }
       await updateWishItem(editingItemId, payload);
     } else {
       await addWishItem(payload);
@@ -357,6 +423,8 @@ export default function WishlistScreen() {
         text: "Eliminar",
         style: "destructive",
         onPress: () => {
+          const target = items.find((w) => w.id === id);
+          if (target) handleDeleteImageLocal(target);
           deleteWishItem(id);
         },
       },
@@ -383,6 +451,78 @@ export default function WishlistScreen() {
     } catch {
       showAlert("Error", "Ocurrió un problema al abrir el enlace.");
     }
+  };
+
+  // Abre la galería del celular, re-encodea la foto elegida (sin metadatos
+  // EXIF) y la guarda en la carpeta local de imágenes del deseo.
+  const handlePickImage = async () => {
+    if (pickingImage) return;
+    setPickingImage(true);
+    try {
+      const result = await launchImageLibraryAsync({
+        mediaTypes: ["images"],
+        quality: 1,
+      });
+      if (result.canceled || !result.assets[0]?.uri) {
+        return;
+      }
+      const localUri = await persistWishImage(result.assets[0].uri);
+      removeLocalWishImage(imageInput);
+      setImageInput(localUri);
+    } catch (err) {
+      // El picker puede fallar por URI no leíble (content:// externo) o un
+      // error del sistema; se loguea la causa real para diagnóstico.
+      console.error("handlePickImage falló", err);
+      showAlert("Error", "No se pudo cargar la imagen. Intenta de nuevo.");
+    } finally {
+      setPickingImage(false);
+    }
+  };
+
+  // Quita la imagen del formulario y borra el archivo local si lo había.
+  const handleRemoveImage = () => {
+    removeLocalWishImage(imageInput);
+    setImageInput("");
+  };
+
+  // Cambia la foto del deseo desde el modal de detalle: elige de la galería,
+  // la persiste localmente y actualiza el item (y el estado local del modal).
+  const handleChangeDetailImage = async () => {
+    if (!viewingItem) return;
+    try {
+      const result = await launchImageLibraryAsync({
+        mediaTypes: ["images"],
+        quality: 1,
+      });
+      if (result.canceled || !result.assets[0]?.uri) {
+        return;
+      }
+      const localUri = await persistWishImage(result.assets[0].uri);
+      if (localUri === viewingItem.image) {
+        return;
+      }
+      if (viewingItem.image) {
+        removeLocalWishImage(viewingItem.image);
+      }
+      const updated = { ...viewingItem, image: localUri };
+      await updateWishItem(viewingItem.id, {
+        title: updated.title,
+        link: updated.link,
+        amount: updated.amount,
+        description: updated.description,
+        image: updated.image,
+        category: updated.category,
+      });
+      setViewingItem(updated);
+    } catch (err) {
+      console.error("handleChangeDetailImage falló", err);
+      showAlert("Error", "No se pudo cargar la imagen. Intenta de nuevo.");
+    }
+  };
+
+  // Si la imagen guardada era local (subida desde el cel), borra el archivo.
+  const handleDeleteImageLocal = (item: WishItem) => {
+    removeLocalWishImage(item.image);
   };
 
   return (
@@ -415,10 +555,13 @@ export default function WishlistScreen() {
           />
         }
         style={{ flex: 1 }}
-        contentContainerStyle={styles.listContent}
+        contentContainerStyle={[styles.listContent, { paddingBottom: bottomPad + 88 }]}
       />
 
-      <TouchableOpacity style={styles.favButton} onPress={handleOpenCreateModal}>
+      <TouchableOpacity
+        style={[styles.favButton, { bottom: bottomPad + 20 }]}
+        onPress={handleOpenCreateModal}
+      >
         <Ionicons name="add" size={28} color={colors.surface} />
       </TouchableOpacity>
 
@@ -520,14 +663,46 @@ export default function WishlistScreen() {
                 })}
               </View>
 
-              <AppText style={styles.label}>Enlace de Imagen (Opcional)</AppText>
+              <AppText style={styles.label}>Imagen (Opcional)</AppText>
+              <View style={styles.imageRow}>
+                <TouchableOpacity
+                  style={[styles.imagePickBtn, imageInput && styles.imagePickBtnActive]}
+                  onPress={handlePickImage}
+                  disabled={pickingImage}
+                  activeOpacity={0.85}
+                >
+                  {pickingImage ? (
+                    <ActivityIndicator size="small" color={colors.primary} />
+                  ) : (
+                    <Ionicons name="image-outline" size={18} color={colors.primary} />
+                  )}
+                  <AppText style={styles.imagePickText} disableHorizontalPadding>
+                    {pickingImage ? "Procesando…" : "Subir imagen"}
+                  </AppText>
+                </TouchableOpacity>
+                <AppText style={styles.imageOrText} disableHorizontalPadding>
+                  o pega el enlace de abajo
+                </AppText>
+              </View>
               <TextInput
                 style={styles.input}
                 placeholder="https://sitio.com/imagen.jpg"
                 placeholderTextColor={colors.textSecondary}
                 value={imageInput}
                 onChangeText={setImageInput}
+                editable={!pickingImage}
               />
+              {imageInput ? (
+                <View style={styles.imagePreviewRow}>
+                  <Image source={{ uri: imageInput }} style={styles.imagePreview} resizeMode="cover" />
+                  <TouchableOpacity style={styles.imageRemoveBtn} onPress={handleRemoveImage} activeOpacity={0.85}>
+                    <Ionicons name="trash-outline" size={16} color={colors.error} />
+                    <AppText style={styles.imageRemoveText} disableHorizontalPadding>
+                      Quitar imagen
+                    </AppText>
+                  </TouchableOpacity>
+                </View>
+              ) : null}
 
               <TouchableOpacity style={styles.saveButton} onPress={handleSaveItem}>
                 <AppText style={styles.saveButtonText}>{isEditing ? "Guardar cambios" : "Guardar deseo"}</AppText>
@@ -542,13 +717,14 @@ export default function WishlistScreen() {
           item={viewingItem}
           onClose={() => setViewingItem(null)}
           onOpenLink={handleOpenLink}
+          onChangeImage={handleChangeDetailImage}
         />
       )}
     </View>
   );
 }
 
-function getStyles(colors: ThemeColors) {
+function getStyles(colors: ThemeColors, bottomPad = 0) {
   return StyleSheet.create({
     container: {
       flex: 1,
@@ -582,7 +758,7 @@ function getStyles(colors: ThemeColors) {
       justifyContent: "flex-end",
     },
     modalView: {
-      backgroundColor: colors.surface,
+      backgroundColor: colors.background,
       borderTopLeftRadius: 20,
       borderTopRightRadius: 20,
       maxHeight: "90%",
@@ -604,6 +780,7 @@ function getStyles(colors: ThemeColors) {
     },
     modalScroll: {
       padding: 16,
+      paddingBottom: 16 + bottomPad,
     },
     label: {
       fontSize: 14,
@@ -687,6 +864,69 @@ function getStyles(colors: ThemeColors) {
       color: colors.surface,
       fontSize: 16,
       fontWeight: "bold",
+    },
+    imageRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 10,
+      marginBottom: 10,
+    },
+    imagePickBtn: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 8,
+      backgroundColor: colors.background,
+      borderColor: colors.border,
+      borderWidth: 1,
+      borderRadius: 12,
+      paddingVertical: 10,
+      paddingHorizontal: 14,
+    },
+    imagePickBtnActive: {
+      borderColor: colors.primary,
+    },
+    imagePickText: {
+      fontSize: 14,
+      fontWeight: "600",
+      color: colors.primary,
+    },
+    imageOrText: {
+      fontSize: 13,
+      color: colors.textSecondary,
+    },
+    imageLinkBtn: {
+      borderColor: colors.border,
+      backgroundColor: colors.background,
+    },
+    imageLinkText: {
+      fontSize: 14,
+      color: colors.textSecondary,
+    },
+    imagePreviewRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 12,
+      marginBottom: 16,
+    },
+    imagePreview: {
+      width: 64,
+      height: 64,
+      borderRadius: 12,
+      borderWidth: 1,
+      borderColor: colors.border,
+      backgroundColor: colors.surface,
+    },
+    imageRemoveBtn: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 6,
+      paddingVertical: 8,
+      paddingHorizontal: 10,
+    },
+    imageRemoveText: {
+      fontSize: 13,
+      fontWeight: "600",
+      color: colors.error,
     },
   });
 }

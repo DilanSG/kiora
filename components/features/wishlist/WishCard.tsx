@@ -77,7 +77,6 @@ function resolveCategoryPresentation(rawCategory: string): CategoryPresentation 
   };
 }
 
-// Tarjeta para renderizar un articulo individual de la Wishlist.
 // Long-press abre edicion, trash elimina, y el boton "Ver enlace" abre el link.
 export function WishCard({ item, onPress, onDelete, onOpenLink, onEdit }: Props) {
   const colors = useTheme();

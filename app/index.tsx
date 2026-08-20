@@ -18,12 +18,13 @@ import AppText from "../components/ui/AppText";
 import GlowView from "../components/ui/GlowView";
 import { Goal } from "../lib/storage/types";
 import { formatCurrency } from "../lib/currency";
+import { useSafeBottom } from "../hooks/useSafeBottom";
 
-// Pantalla principal (Dashboard): clima, resumen rápido, finanzas, metas en
 // curso, tareas pendientes, deseos y notas recientes. Todo enlaza a su tab.
 export default function HomeScreen() {
   const colors = useTheme();
   const { glowStyle } = useGlow();
+  const bottomPad = useSafeBottom();
   const styles = getStyles(colors);
   const router = useRouter();
 
@@ -60,7 +61,7 @@ export default function HomeScreen() {
   return (
     <View style={styles.wrapper}>
       <BackgroundDecor colors={colors} screenVariant={0} />
-    <ScrollView style={styles.scroll} contentContainerStyle={styles.scrollInner}>
+    <ScrollView style={styles.scroll} contentContainerStyle={[styles.scrollInner, { paddingBottom: bottomPad + 24 }]}>
 
       {loading ? (
         <ActivityIndicator size="small" color={colors.primary} style={{ marginTop: 40 }} />
@@ -111,7 +112,7 @@ export default function HomeScreen() {
           icon="trending-up-outline"
           value={formatCompact(monthStats.income)}
           label="Ingresos mes"
-          color={colors.success}
+          color={colors.chartPositive || colors.success}
           onPress={() => router.push("/finance")}
         />
         <StatTile
@@ -120,7 +121,7 @@ export default function HomeScreen() {
           icon="trending-down-outline"
           value={formatCompact(monthStats.expenses)}
           label="Gastos mes"
-          color={colors.error}
+          color={colors.chartNegative || colors.error}
           onPress={() => router.push("/finance")}
         />
         <StatTile
@@ -129,7 +130,7 @@ export default function HomeScreen() {
           icon="wallet-outline"
           value={formatCompact(monthStats.balance)}
           label="Balance mes"
-          color={monthStats.balance >= 0 ? colors.success : colors.error}
+          color={monthStats.balance >= 0 ? colors.chartPositive || colors.success : colors.chartNegative || colors.error}
           onPress={() => router.push("/finance")}
         />
       </View>
@@ -358,7 +359,6 @@ type StatTileProps = {
   styles: ReturnType<typeof getStyles>;
 };
 
-// Tile de resumen rápido: icono + valor + etiqueta, navega a su sección.
 function StatTile({ icon, value, label, color, onPress, glowStyle, styles }: StatTileProps) {
   return (
     <TouchableOpacity style={[styles.statTile, glowStyle]} onPress={onPress} activeOpacity={0.8}>
@@ -680,7 +680,7 @@ function getStyles(colors: ThemeColors) {
     weatherModalCard: {
       width: "100%",
       maxWidth: 340,
-      backgroundColor: colors.surface,
+      backgroundColor: colors.background,
       borderRadius: 20,
       borderWidth: 1,
       borderColor: colors.border,

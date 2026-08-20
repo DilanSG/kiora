@@ -40,7 +40,24 @@
       "expo-sqlite",
       "expo-asset",
       "expo-font",
-      "./plugins/withAndroidSecurity.js"
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Kiora necesita acceso a tus fotos para poner la imagen del deseo.",
+          "microphonePermission": false,
+          "cameraPermission": false
+        }
+      ],
+      "./plugins/withAndroidSecurity.js",
+      "./plugins/withSmsReader.js",
+      [
+        "expo-navigation-bar",
+        {
+          "visibility": "hidden",
+          "behavior": "overlay-swipe",
+          "position": "absolute"
+        }
+      ]
     ]
   }
 }

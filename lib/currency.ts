@@ -1,8 +1,4 @@
-// Utilidades de formato de moneda con scope global (pesos colombianos).
-// Convención: puntos para miles (1.500.000), sin decimales (redondeo a entero).
-// JS puro sin Intl para comportamiento determinista en Hermes/web.
 
-// Formatea un número como entero con puntos de miles. Ej: 1500000 → "1.500.000", -500 → "-500".
 export function formatNumber(value: number): string {
   const rounded = Math.round(value);
   const sign = rounded < 0 ? "-" : "";
@@ -10,7 +6,6 @@ export function formatNumber(value: number): string {
   return sign + digits.replace(/\B(?=(\d{3})+(?!\d))/g, ".");
 }
 
-// Formatea un monto con símbolo de moneda. Ej: 1500000 → "$1.500.000", -500 → "-$500".
 export function formatCurrency(value: number): string {
   const sign = value < 0 ? "-" : "";
   return sign + "$" + formatNumber(Math.abs(value));

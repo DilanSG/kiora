@@ -15,9 +15,8 @@ const PURCHASED_KEYS: { key: string; items: { id: string }[] }[] = [
   { key: "purchased_glow", items: GLOW_PRESETS },
 ];
 
-// Desbloquea las seis tiendas marcando todos los IDs como comprados.
-// Una sola transaccion exclusiva para que un crash entre categoria no
-// deje el desbloqueo a medias.
+// Una sola transacción exclusiva para que un crash entre categorías no deje
+// el desbloqueo a medias.
 export async function unlockAllStyles(): Promise<void> {
   const db = getDb();
 
@@ -31,9 +30,6 @@ export async function unlockAllStyles(): Promise<void> {
   });
 }
 
-// Verifica si las seis tiendas estan completas comparando cada lista de
-// comprados contra su catalogo completo. Retorna true solo si todas
-// contienen todos los IDs.
 export async function areAllStylesUnlocked(): Promise<boolean> {
   const db = getDb();
   const results = await Promise.all(

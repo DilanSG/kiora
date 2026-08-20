@@ -9,10 +9,10 @@ import { formatCurrency } from "../../../lib/currency";
 type Props = {
   item: Transaction;
   onPress: (item: Transaction) => void;
+  onLongPress?: (item: Transaction) => void;
 };
 
-// Formatea una fecha ISO como "28 may · 14:30". Recibe cadena ISO 8601 de la fecha.
-// Retorna texto legible con día, mes abreviado y hora.
+// Formatea fecha ISO como "28 may · 14:30" (día, mes abreviado y hora).
 function formatDateTime(iso: string): string {
   const date = new Date(iso);
   const day = date.getDate();
@@ -22,16 +22,21 @@ function formatDateTime(iso: string): string {
   return `${day} ${month} · ${h}:${m}`;
 }
 
-// Tarjeta individual de un movimiento financiero. Al presionarla abre el modal de edición.
-// Muestra tipo, monto, descripción, categoría y fecha/hora de registro.
-export function TransactionCard({ item, onPress }: Props) {
+// Tarjeta individual de un movimiento financiero. Un toque simple abre el
+// detalle; mantener presionada la tarjeta abre el modal de edición.
+export function TransactionCard({ item, onPress, onLongPress }: Props) {
   const colors = useTheme();
   const { glowStyle } = useGlow();
   const styles = getStyles(colors);
   const isIncome = item.type === "income";
 
   return (
-      <TouchableOpacity style={[styles.card, glowStyle]} onPress={() => onPress(item)} activeOpacity={0.7}>
+      <TouchableOpacity
+        style={[styles.card, glowStyle]}
+        onPress={() => onPress(item)}
+        onLongPress={onLongPress ? () => onLongPress(item) : undefined}
+        activeOpacity={0.7}
+      >
         <View style={[styles.iconContainer, isIncome ? styles.incomeIcon : styles.expenseIcon]}>
           <Ionicons
             name={isIncome ? "arrow-up-circle-outline" : "arrow-down-circle-outline"}
