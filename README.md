@@ -157,6 +157,8 @@ Requisitos: Node.js 20+, Android Studio / Xcode según plataforma, o `npx expo s
 
 ## APK
 
+Descarga directa de la última versión: [Release v1.0.0](https://github.com/DilanSG/kiora/releases/download/v1.0.0/kiora.apk).
+
 Build de Android con EAS (perfil `preview`, APK de distribución interna):
 
 ```bash
